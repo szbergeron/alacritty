@@ -461,12 +461,12 @@ impl<'a, T: EventListener, A: ActionContext<T>> Processor<'a, T, A> {
     pub fn mouse_wheel_input(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
         match delta {
             MouseScrollDelta::LineDelta(_columns, lines) => {
-                println!("Got a mouse line delta");
+                //println!("Got a mouse line delta");
                 let new_scroll_px = lines * self.ctx.size_info().cell_height;
                 self.scroll_terminal(new_scroll_px as i32);
             },
             MouseScrollDelta::PixelDelta(lpos) => {
-                println!("Got a mouse pixel delta");
+                //println!("Got a mouse pixel delta");
                 match phase {
                     TouchPhase::Started => {
                         // Reset offset to zero
