@@ -144,6 +144,13 @@ pub enum Scroll {
     Bottom,
 }
 
+#[derive(Copy, Clone)]
+pub enum Pan {
+    Absolute(f64),
+    Interrupt,
+    Fling,
+}
+
 impl<T: GridCell + PartialEq + Copy> Grid<T> {
     pub fn new(lines: Line, cols: Column, scrollback: usize, template: T) -> Grid<T> {
         let raw = Storage::with_capacity(lines, Row::new(cols, &template));

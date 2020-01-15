@@ -24,7 +24,7 @@ use alacritty_terminal::config::Font;
 use alacritty_terminal::config::LOG_TARGET_CONFIG;
 use alacritty_terminal::event::OnResize;
 use alacritty_terminal::event::{Event, EventListener, Notify};
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Scroll, Pan};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::message_bar::{Message, MessageBuffer};
 use alacritty_terminal::selection::Selection;
@@ -76,6 +76,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 
     fn size_info(&self) -> SizeInfo {
         *self.size_info
+    }
+
+    fn pan(&mut self, pan: Pan) {
+        match pan {
+            Pan::Absolute(amount) => println!("Pan of {}", amount),
+            _ => println!("Some other pan type"),
+        }
     }
 
     fn scroll(&mut self, scroll: Scroll) {
@@ -556,6 +563,9 @@ impl<N: Notify + OnResize> Processor<N> {
                         processor.ctx.window.set_mouse_visible(true);
                         processor.mouse_wheel_input(delta, phase);
                     },
+                    AxisMotion { axis, value, .. } => {
+                        println!("Axis event! {} {}", axis, value);
+                    }
                     Focused(is_focused) => {
                         if window_id == processor.ctx.window.window_id() {
                             processor.ctx.terminal.is_focused = is_focused;

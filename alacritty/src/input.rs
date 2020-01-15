@@ -33,7 +33,7 @@ use log::{debug, trace, warn};
 use alacritty_terminal::ansi::{ClearMode, Handler};
 use alacritty_terminal::clipboard::ClipboardType;
 use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Scroll, Pan};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::message_bar::{self, Message};
 use alacritty_terminal::selection::Selection;
@@ -78,6 +78,7 @@ pub trait ActionContext<T: EventListener> {
     fn suppress_chars(&mut self) -> &mut bool;
     fn modifiers(&mut self) -> &mut ModifiersState;
     fn scroll(&mut self, scroll: Scroll);
+    fn pan(&mut self, pan: Pan);
     fn window(&self) -> &Window;
     fn window_mut(&mut self) -> &mut Window;
     fn terminal(&self) -> &Term<T>;
@@ -460,17 +461,19 @@ impl<'a, T: EventListener, A: ActionContext<T>> Processor<'a, T, A> {
     pub fn mouse_wheel_input(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
         match delta {
             MouseScrollDelta::LineDelta(_columns, lines) => {
+                println!("Got a mouse line delta");
                 let new_scroll_px = lines * self.ctx.size_info().cell_height;
                 self.scroll_terminal(new_scroll_px as i32);
             },
             MouseScrollDelta::PixelDelta(lpos) => {
+                println!("Got a mouse pixel delta");
                 match phase {
                     TouchPhase::Started => {
                         // Reset offset to zero
                         self.ctx.mouse_mut().scroll_px = 0;
                     },
                     TouchPhase::Moved => {
-                        self.scroll_terminal(lpos.y as i32);
+                        self.scroll_terminal((lpos.y * 7.0) as i32);
                     },
                     _ => (),
                 }
@@ -770,7 +773,7 @@ mod tests {
 
     use alacritty_terminal::clipboard::{Clipboard, ClipboardType};
     use alacritty_terminal::event::{Event as TerminalEvent, EventListener};
-    use alacritty_terminal::grid::Scroll;
+    use alacritty_terminal::grid::{Scroll, Pan};
     use alacritty_terminal::index::{Point, Side};
     use alacritty_terminal::message_bar::{Message, MessageBuffer};
     use alacritty_terminal::selection::Selection;
@@ -857,6 +860,10 @@ mod tests {
 
         fn scroll(&mut self, scroll: Scroll) {
             self.terminal.scroll_display(scroll);
+        }
+
+        fn pan(&mut self, pan: Pan) {
+            println!("Unimplemented pan handler at {}, {}", std::file!(), std::line!());
         }
 
         fn mouse_coords(&self) -> Option<Point> {
