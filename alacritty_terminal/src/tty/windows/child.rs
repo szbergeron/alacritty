@@ -1,15 +1,3 @@
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use std::ffi::c_void;
 use std::io::Error;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -76,7 +64,7 @@ impl Drop for ChildExitWatcher {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::os::windows::io::AsRawHandle;
     use std::process::Command;
     use std::time::Duration;
@@ -106,10 +94,10 @@ mod test {
 
         child.kill().unwrap();
 
-        // Poll for the event or fail with timeout if nothing has been sent
+        // Poll for the event or fail with timeout if nothing has been sent.
         poll.poll(&mut events, Some(WAIT_TIMEOUT)).unwrap();
         assert_eq!(events.iter().next().unwrap().token(), child_events_token);
-        // Verify that at least one `ChildEvent::Exited` was received
+        // Verify that at least one `ChildEvent::Exited` was received.
         assert_eq!(child_exit_watcher.event_rx().try_recv(), Ok(ChildEvent::Exited));
     }
 }

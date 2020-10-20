@@ -1,26 +1,16 @@
-// Copyright 2019 Joe Wilm, The Alacritty Project Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use std::cmp::max;
 use std::path::PathBuf;
 
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg};
 use log::{self, error, LevelFilter};
+use serde_yaml::Value;
 
-use alacritty_terminal::config::{Delta, Dimensions, Shell, DEFAULT_NAME};
+use alacritty_terminal::config::Program;
 use alacritty_terminal::index::{Column, Line};
 
+use crate::config::serde_utils;
+use crate::config::ui_config::Delta;
+use crate::config::window::{Dimensions, DEFAULT_NAME};
 use crate::config::Config;
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -30,7 +20,7 @@ const CONFIG_PATH: &str = "%APPDATA%\\alacritty\\alacritty.yml";
 #[cfg(target_os = "macos")]
 const CONFIG_PATH: &str = "$HOME/.config/alacritty/alacritty.yml";
 
-/// Options specified on the command line
+/// Options specified on the command line.
 pub struct Options {
     pub live_config_reload: Option<bool>,
     pub print_events: bool,
@@ -38,14 +28,16 @@ pub struct Options {
     pub dimensions: Option<Dimensions>,
     pub position: Option<Delta<i32>>,
     pub title: Option<String>,
-    pub class: Option<String>,
+    pub class_instance: Option<String>,
+    pub class_general: Option<String>,
     pub embed: Option<String>,
     pub log_level: LevelFilter,
-    pub command: Option<Shell<'static>>,
+    pub command: Option<Program>,
     pub hold: bool,
-    pub working_dir: Option<PathBuf>,
-    pub config: Option<PathBuf>,
+    pub working_directory: Option<PathBuf>,
+    pub config_path: Option<PathBuf>,
     pub persistent_logging: bool,
+    pub config_options: Value,
 }
 
 impl Default for Options {
@@ -57,14 +49,16 @@ impl Default for Options {
             dimensions: None,
             position: None,
             title: None,
-            class: None,
+            class_instance: None,
+            class_general: None,
             embed: None,
             log_level: LevelFilter::Warn,
             command: None,
             hold: false,
-            working_dir: None,
-            config: None,
+            working_directory: None,
+            config_path: None,
             persistent_logging: false,
+            config_options: Value::Null,
         }
     }
 }
@@ -136,8 +130,13 @@ impl Options {
             .arg(
                 Arg::with_name("class")
                     .long("class")
+                    .value_name("instance> | <instance>,<general")
                     .takes_value(true)
-                    .help(&format!("Defines window class on Linux [default: {}]", DEFAULT_NAME)),
+                    .use_delimiter(true)
+                    .help(&format!(
+                        "Defines window class/app_id on X11/Wayland [default: {}]",
+                        DEFAULT_NAME
+                    )),
             )
             .arg(
                 Arg::with_name("embed").long("embed").takes_value(true).help(
@@ -173,11 +172,18 @@ impl Options {
                     .short("e")
                     .multiple(true)
                     .takes_value(true)
-                    .min_values(1)
                     .allow_hyphen_values(true)
                     .help("Command and args to execute (must be last argument)"),
             )
             .arg(Arg::with_name("hold").long("hold").help("Remain open after child process exits"))
+            .arg(
+                Arg::with_name("option")
+                    .long("option")
+                    .short("o")
+                    .multiple(true)
+                    .takes_value(true)
+                    .help("Override configuration file options [example: cursor.style=Beam]"),
+            )
             .get_matches();
 
         if matches.is_present("ref-test") {
@@ -199,10 +205,10 @@ impl Options {
         }
 
         if let Some(mut dimensions) = matches.values_of("dimensions") {
-            let width = dimensions.next().map(|w| w.parse().map(Column));
-            let height = dimensions.next().map(|h| h.parse().map(Line));
-            if let (Some(Ok(width)), Some(Ok(height))) = (width, height) {
-                options.dimensions = Some(Dimensions::new(width, height));
+            let columns = dimensions.next().map(|columns| columns.parse().map(Column));
+            let lines = dimensions.next().map(|lines| lines.parse().map(Line));
+            if let (Some(Ok(columns)), Some(Ok(lines))) = (columns, lines) {
+                options.dimensions = Some(Dimensions { columns, lines });
             }
         }
 
@@ -214,126 +220,219 @@ impl Options {
             }
         }
 
-        options.class = matches.value_of("class").map(ToOwned::to_owned);
+        if let Some(mut class) = matches.values_of("class") {
+            options.class_instance = class.next().map(|instance| instance.to_owned());
+            options.class_general = class.next().map(|general| general.to_owned());
+        }
+
         options.title = matches.value_of("title").map(ToOwned::to_owned);
         options.embed = matches.value_of("embed").map(ToOwned::to_owned);
 
         match matches.occurrences_of("q") {
-            0 => {},
+            0 => (),
             1 => options.log_level = LevelFilter::Error,
-            2 | _ => options.log_level = LevelFilter::Off,
+            _ => options.log_level = LevelFilter::Off,
         }
 
         match matches.occurrences_of("v") {
             0 if !options.print_events => options.log_level = LevelFilter::Warn,
             0 | 1 => options.log_level = LevelFilter::Info,
             2 => options.log_level = LevelFilter::Debug,
-            3 | _ => options.log_level = LevelFilter::Trace,
+            _ => options.log_level = LevelFilter::Trace,
         }
 
         if let Some(dir) = matches.value_of("working-directory") {
-            options.working_dir = Some(PathBuf::from(dir.to_string()));
+            options.working_directory = Some(PathBuf::from(dir.to_string()));
         }
 
         if let Some(path) = matches.value_of("config-file") {
-            options.config = Some(PathBuf::from(path.to_string()));
+            options.config_path = Some(PathBuf::from(path.to_string()));
         }
 
         if let Some(mut args) = matches.values_of("command") {
             // The following unwrap is guaranteed to succeed.
-            // If 'command' exists it must also have a first item since
-            // Arg::min_values(1) is set.
-            let command = String::from(args.next().unwrap());
+            // If `command` exists it must also have a first item since
+            // `Arg::min_values(1)` is set.
+            let program = String::from(args.next().unwrap());
             let args = args.map(String::from).collect();
-            options.command = Some(Shell::new_with_args(command, args));
+            options.command = Some(Program::WithArgs { program, args });
         }
 
         if matches.is_present("hold") {
             options.hold = true;
         }
 
-        options
-    }
-
-    pub fn config_path(&self) -> Option<PathBuf> {
-        self.config.clone()
-    }
-
-    pub fn into_config(self, mut config: Config) -> Config {
-        match self.working_dir.or_else(|| config.working_directory.take()) {
-            Some(ref wd) if !wd.is_dir() => error!("Unable to set working directory to {:?}", wd),
-            wd => config.working_directory = wd,
-        }
-
-        if let Some(lcr) = self.live_config_reload {
-            config.set_live_config_reload(lcr);
-        }
-        config.shell = self.command.or(config.shell);
-
-        config.hold = self.hold;
-
-        config.window.dimensions = self.dimensions.unwrap_or(config.window.dimensions);
-        config.window.title = self.title.unwrap_or(config.window.title);
-        config.window.position = self.position.or(config.window.position);
-        config.window.embed = self.embed.and_then(|embed| embed.parse().ok());
-
-        if let Some(class) = self.class {
-            let parts: Vec<_> = class.split(',').collect();
-            config.window.class.instance = parts[0].into();
-            if let Some(&general) = parts.get(1) {
-                config.window.class.general = general.into();
+        if let Some(config_options) = matches.values_of("option") {
+            for option in config_options {
+                match option_as_value(option) {
+                    Ok(value) => {
+                        options.config_options = serde_utils::merge(options.config_options, value);
+                    },
+                    Err(_) => eprintln!("Invalid CLI config option: {:?}", option),
+                }
             }
         }
 
-        config.set_dynamic_title(config.dynamic_title() && config.window.title == DEFAULT_NAME);
+        options
+    }
 
-        config.debug.print_events = self.print_events || config.debug.print_events;
-        config.debug.log_level = max(config.debug.log_level, self.log_level);
-        config.debug.ref_test = self.ref_test || config.debug.ref_test;
-        config.debug.persistent_logging =
-            self.persistent_logging || config.debug.persistent_logging;
+    /// Configuration file path.
+    pub fn config_path(&self) -> Option<PathBuf> {
+        self.config_path.clone()
+    }
 
-        if config.debug.print_events {
-            config.debug.log_level = max(config.debug.log_level, LevelFilter::Info);
+    /// CLI config options as deserializable serde value.
+    pub fn config_options(&self) -> &Value {
+        &self.config_options
+    }
+
+    /// Override configuration file with options from the CLI.
+    pub fn override_config(&self, config: &mut Config) {
+        if let Some(working_directory) = &self.working_directory {
+            if working_directory.is_dir() {
+                config.working_directory = Some(working_directory.to_owned());
+            } else {
+                error!("Invalid working directory: {:?}", working_directory);
+            }
         }
 
-        config
+        if let Some(lcr) = self.live_config_reload {
+            config.ui_config.set_live_config_reload(lcr);
+        }
+
+        if let Some(command) = &self.command {
+            config.shell = Some(command.clone());
+        }
+
+        config.hold = self.hold;
+
+        let dynamic_title = config.ui_config.dynamic_title() && self.title.is_none();
+        config.ui_config.set_dynamic_title(dynamic_title);
+
+        if let Some(dimensions) = self.dimensions {
+            config.ui_config.window.set_dimensions(dimensions);
+        }
+
+        replace_if_some(&mut config.ui_config.window.title, self.title.clone());
+        replace_if_some(&mut config.ui_config.window.class.instance, self.class_instance.clone());
+        replace_if_some(&mut config.ui_config.window.class.general, self.class_general.clone());
+
+        config.ui_config.window.position = self.position.or(config.ui_config.window.position);
+        config.ui_config.window.embed = self.embed.as_ref().and_then(|embed| embed.parse().ok());
+        config.ui_config.debug.print_events |= self.print_events;
+        config.ui_config.debug.log_level = max(config.ui_config.debug.log_level, self.log_level);
+        config.ui_config.debug.ref_test |= self.ref_test;
+        config.ui_config.debug.persistent_logging |= self.persistent_logging;
+
+        if config.ui_config.debug.print_events {
+            config.ui_config.debug.log_level =
+                max(config.ui_config.debug.log_level, LevelFilter::Info);
+        }
     }
 }
 
+fn replace_if_some<T>(option: &mut T, value: Option<T>) {
+    if let Some(value) = value {
+        *option = value;
+    }
+}
+
+/// Format an option in the format of `parent.field=value` to a serde Value.
+fn option_as_value(option: &str) -> Result<Value, serde_yaml::Error> {
+    let mut yaml_text = String::with_capacity(option.len());
+    let mut closing_brackets = String::new();
+
+    for (i, c) in option.chars().enumerate() {
+        match c {
+            '=' => {
+                yaml_text.push_str(": ");
+                yaml_text.push_str(&option[i + 1..]);
+                break;
+            },
+            '.' => {
+                yaml_text.push_str(": {");
+                closing_brackets.push('}');
+            },
+            _ => yaml_text.push(c),
+        }
+    }
+
+    yaml_text += &closing_brackets;
+
+    serde_yaml::from_str(&yaml_text)
+}
+
 #[cfg(test)]
-mod test {
-    use crate::cli::Options;
-    use crate::config::Config;
+mod tests {
+    use super::*;
+
+    use serde_yaml::mapping::Mapping;
 
     #[test]
     fn dynamic_title_ignoring_options_by_default() {
-        let config = Config::default();
-        let old_dynamic_title = config.dynamic_title();
+        let mut config = Config::default();
+        let old_dynamic_title = config.ui_config.dynamic_title();
 
-        let config = Options::default().into_config(config);
+        Options::default().override_config(&mut config);
 
-        assert_eq!(old_dynamic_title, config.dynamic_title());
+        assert_eq!(old_dynamic_title, config.ui_config.dynamic_title());
     }
 
     #[test]
     fn dynamic_title_overridden_by_options() {
-        let config = Config::default();
+        let mut config = Config::default();
 
         let mut options = Options::default();
         options.title = Some("foo".to_owned());
-        let config = options.into_config(config);
+        options.override_config(&mut config);
 
-        assert!(!config.dynamic_title());
+        assert!(!config.ui_config.dynamic_title());
     }
 
     #[test]
-    fn dynamic_title_overridden_by_config() {
+    fn dynamic_title_not_overridden_by_config() {
         let mut config = Config::default();
 
-        config.window.title = "foo".to_owned();
-        let config = Options::default().into_config(config);
+        config.ui_config.window.title = "foo".to_owned();
+        Options::default().override_config(&mut config);
 
-        assert!(!config.dynamic_title());
+        assert!(config.ui_config.dynamic_title());
+    }
+
+    #[test]
+    fn valid_option_as_value() {
+        // Test with a single field.
+        let value = option_as_value("field=true").unwrap();
+
+        let mut mapping = Mapping::new();
+        mapping.insert(Value::String(String::from("field")), Value::Bool(true));
+
+        assert_eq!(value, Value::Mapping(mapping));
+
+        // Test with nested fields
+        let value = option_as_value("parent.field=true").unwrap();
+
+        let mut parent_mapping = Mapping::new();
+        parent_mapping.insert(Value::String(String::from("field")), Value::Bool(true));
+        let mut mapping = Mapping::new();
+        mapping.insert(Value::String(String::from("parent")), Value::Mapping(parent_mapping));
+
+        assert_eq!(value, Value::Mapping(mapping));
+    }
+
+    #[test]
+    fn invalid_option_as_value() {
+        let value = option_as_value("}");
+        assert!(value.is_err());
+    }
+
+    #[test]
+    fn float_option_as_value() {
+        let value = option_as_value("float=3.4").unwrap();
+
+        let mut expected = Mapping::new();
+        expected.insert(Value::String(String::from("float")), Value::Number(3.4.into()));
+
+        assert_eq!(value, Value::Mapping(expected));
     }
 }

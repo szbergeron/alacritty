@@ -1,31 +1,8 @@
-// Copyright 2016 Joe Wilm, The Alacritty Project Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-//! tty related functionality
+//! TTY related functionality.
 
-use crate::config::{Config, Shell};
-use crate::event::OnResize;
-use crate::term::SizeInfo;
-use crate::tty::{ChildEvent, EventedPty, EventedReadWrite};
-use mio;
-
-use libc::{self, c_int, pid_t, winsize, TIOCSCTTY};
-use log::error;
-use nix::pty::openpty;
-use signal_hook::{self as sighook, iterator::Signals};
-
-use mio::unix::EventedFd;
+use std::borrow::Cow;
+#[cfg(not(target_os = "macos"))]
+use std::env;
 use std::ffi::CStr;
 use std::fs::File;
 use std::io;
@@ -36,17 +13,33 @@ use std::os::unix::{
 };
 use std::process::{Child, Command, Stdio};
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-/// Process ID of child process
+use libc::{self, c_int, pid_t, winsize, TIOCSCTTY};
+use log::error;
+use mio::unix::EventedFd;
+use nix::pty::openpty;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use nix::sys::termios::{self, InputFlags, SetArg};
+use signal_hook::{self as sighook, iterator::Signals};
+
+use crate::config::{Config, Program};
+use crate::event::OnResize;
+use crate::term::SizeInfo;
+use crate::tty::{ChildEvent, EventedPty, EventedReadWrite};
+
+/// Process ID of child process.
 ///
-/// Necessary to put this in static storage for `sigchld` to have access
+/// Necessary to put this in static storage for `SIGCHLD` to have access.
 static PID: AtomicUsize = AtomicUsize::new(0);
+
+/// File descriptor of terminal master.
+static FD: AtomicI32 = AtomicI32::new(-1);
 
 macro_rules! die {
     ($($arg:tt)*) => {{
         error!($($arg)*);
-        ::std::process::exit(1);
+        std::process::exit(1);
     }}
 }
 
@@ -54,7 +47,11 @@ pub fn child_pid() -> pid_t {
     PID.load(Ordering::Relaxed) as pid_t
 }
 
-/// Get raw fds for master/slave ends of a new pty
+pub fn master_fd() -> RawFd {
+    FD.load(Ordering::Relaxed) as RawFd
+}
+
+/// Get raw fds for master/slave ends of a new PTY.
 fn make_pty(size: winsize) -> (RawFd, RawFd) {
     let mut win_size = size;
     win_size.ws_xpixel = 0;
@@ -65,7 +62,7 @@ fn make_pty(size: winsize) -> (RawFd, RawFd) {
     (ends.master, ends.slave)
 }
 
-/// Really only needed on BSD, but should be fine elsewhere
+/// Really only needed on BSD, but should be fine elsewhere.
 fn set_controlling_terminal(fd: c_int) {
     let res = unsafe {
         // TIOSCTTY changes based on platform and the `ioctl` call is different
@@ -92,13 +89,13 @@ struct Passwd<'a> {
     shell: &'a str,
 }
 
-/// Return a Passwd struct with pointers into the provided buf
+/// Return a Passwd struct with pointers into the provided buf.
 ///
 /// # Unsafety
 ///
 /// If `buf` is changed while `Passwd` is alive, bad thing will almost certainly happen.
 fn get_pw_entry(buf: &mut [i8; 1024]) -> Passwd<'_> {
-    // Create zeroed passwd struct
+    // Create zeroed passwd struct.
     let mut entry: MaybeUninit<libc::passwd> = MaybeUninit::uninit();
 
     let mut res: *mut libc::passwd = ptr::null_mut();
@@ -118,10 +115,10 @@ fn get_pw_entry(buf: &mut [i8; 1024]) -> Passwd<'_> {
         die!("pw not found");
     }
 
-    // sanity check
+    // Sanity check.
     assert_eq!(entry.pw_uid, uid);
 
-    // Build a borrowed Passwd struct
+    // Build a borrowed Passwd struct.
     Passwd {
         name: unsafe { CStr::from_ptr(entry.pw_name).to_str().unwrap() },
         passwd: unsafe { CStr::from_ptr(entry.pw_passwd).to_str().unwrap() },
@@ -141,42 +138,59 @@ pub struct Pty {
     signals_token: mio::Token,
 }
 
-/// Create a new tty and return a handle to interact with it.
+#[cfg(target_os = "macos")]
+fn default_shell(pw: &Passwd<'_>) -> Program {
+    let shell_name = pw.shell.rsplit('/').next().unwrap();
+    let argv = vec![String::from("-c"), format!("exec -a -{} {}", shell_name, pw.shell)];
+
+    Program::WithArgs { program: "/bin/bash".to_owned(), args: argv }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_shell(pw: &Passwd<'_>) -> Program {
+    Program::Just(env::var("SHELL").unwrap_or_else(|_| pw.shell.to_owned()))
+}
+
+/// Create a new TTY and return a handle to interact with it.
 pub fn new<C>(config: &Config<C>, size: &SizeInfo, window_id: Option<usize>) -> Pty {
-    let win_size = size.to_winsize();
+    let (master, slave) = make_pty(size.to_winsize());
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Ok(mut termios) = termios::tcgetattr(master) {
+        // Set character encoding to UTF-8.
+        termios.input_flags.set(InputFlags::IUTF8, true);
+        let _ = termios::tcsetattr(master, SetArg::TCSANOW, &termios);
+    }
+
     let mut buf = [0; 1024];
     let pw = get_pw_entry(&mut buf);
 
-    let (master, slave) = make_pty(win_size);
-
-    let default_shell = if cfg!(target_os = "macos") {
-        let shell_name = pw.shell.rsplit('/').next().unwrap();
-        let argv = vec![String::from("-c"), format!("exec -a -{} {}", shell_name, pw.shell)];
-
-        Shell::new_with_args("/bin/bash", argv)
-    } else {
-        Shell::new(pw.shell)
+    let shell = match config.shell.as_ref() {
+        Some(shell) => Cow::Borrowed(shell),
+        None => Cow::Owned(default_shell(&pw)),
     };
-    let shell = config.shell.as_ref().unwrap_or(&default_shell);
 
-    let mut builder = Command::new(&*shell.program);
-    for arg in &shell.args {
+    let mut builder = Command::new(shell.program());
+    for arg in shell.args() {
         builder.arg(arg);
     }
 
-    // Setup child stdin/stdout/stderr as slave fd of pty
+    // Setup child stdin/stdout/stderr as slave fd of PTY.
     // Ownership of fd is transferred to the Stdio structs and will be closed by them at the end of
     // this scope. (It is not an issue that the fd is closed three times since File::drop ignores
-    // error on libc::close.)
+    // error on libc::close.).
     builder.stdin(unsafe { Stdio::from_raw_fd(slave) });
     builder.stderr(unsafe { Stdio::from_raw_fd(slave) });
     builder.stdout(unsafe { Stdio::from_raw_fd(slave) });
 
-    // Setup shell environment
+    // Setup shell environment.
     builder.env("LOGNAME", pw.name);
     builder.env("USER", pw.name);
-    builder.env("SHELL", pw.shell);
     builder.env("HOME", pw.dir);
+
+    // Set $SHELL environment variable on macOS, since login does not do it for us.
+    #[cfg(target_os = "macos")]
+    builder.env("SHELL", config.shell.as_ref().map(|sh| sh.program()).unwrap_or(pw.shell));
 
     if let Some(window_id) = window_id {
         builder.env("WINDOWID", format!("{}", window_id));
@@ -184,7 +198,7 @@ pub fn new<C>(config: &Config<C>, size: &SizeInfo, window_id: Option<usize>) -> 
 
     unsafe {
         builder.pre_exec(move || {
-            // Create a new process group
+            // Create a new process group.
             let err = libc::setsid();
             if err == -1 {
                 die!("Failed to set session id: {}", io::Error::last_os_error());
@@ -192,7 +206,7 @@ pub fn new<C>(config: &Config<C>, size: &SizeInfo, window_id: Option<usize>) -> 
 
             set_controlling_terminal(slave);
 
-            // No longer need slave/master fds
+            // No longer need slave/master fds.
             libc::close(slave);
             libc::close(master);
 
@@ -207,18 +221,19 @@ pub fn new<C>(config: &Config<C>, size: &SizeInfo, window_id: Option<usize>) -> 
         });
     }
 
-    // Handle set working directory option
+    // Handle set working directory option.
     if let Some(dir) = &config.working_directory {
         builder.current_dir(dir);
     }
 
-    // Prepare signal handling before spawning child
+    // Prepare signal handling before spawning child.
     let signals = Signals::new(&[sighook::SIGCHLD]).expect("error preparing signal handling");
 
     match builder.spawn() {
         Ok(child) => {
-            // Remember child PID so other modules can use it
+            // Remember master FD and child PID so other modules can use it.
             PID.store(child.id() as usize, Ordering::Relaxed);
+            FD.store(master, Ordering::Relaxed);
 
             unsafe {
                 // Maybe this should be done outside of this function so nonblocking
@@ -236,7 +251,7 @@ pub fn new<C>(config: &Config<C>, size: &SizeInfo, window_id: Option<usize>) -> 
             pty.on_resize(size);
             pty
         },
-        Err(err) => die!("Failed to spawn command '{}': {}", shell.program, err),
+        Err(err) => die!("Failed to spawn command '{}': {}", shell.program(), err),
     }
 }
 
@@ -333,25 +348,25 @@ impl EventedPty for Pty {
     }
 }
 
-/// Types that can produce a `libc::winsize`
+/// Types that can produce a `libc::winsize`.
 pub trait ToWinsize {
-    /// Get a `libc::winsize`
+    /// Get a `libc::winsize`.
     fn to_winsize(&self) -> winsize;
 }
 
 impl<'a> ToWinsize for &'a SizeInfo {
     fn to_winsize(&self) -> winsize {
         winsize {
-            ws_row: self.lines().0 as libc::c_ushort,
+            ws_row: self.screen_lines().0 as libc::c_ushort,
             ws_col: self.cols().0 as libc::c_ushort,
-            ws_xpixel: self.width as libc::c_ushort,
-            ws_ypixel: self.height as libc::c_ushort,
+            ws_xpixel: self.width() as libc::c_ushort,
+            ws_ypixel: self.height() as libc::c_ushort,
         }
     }
 }
 
 impl OnResize for Pty {
-    /// Resize the pty
+    /// Resize the PTY.
     ///
     /// Tells the kernel that the window size changed with the new pixel
     /// dimensions and line/column counts.

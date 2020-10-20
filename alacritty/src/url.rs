@@ -1,12 +1,11 @@
 use std::cmp::min;
 use std::mem;
 
+use crossfont::Metrics;
 use glutin::event::{ElementState, ModifiersState};
 use urlocator::{UrlLocation, UrlLocator};
 
-use font::Metrics;
-
-use alacritty_terminal::index::Point;
+use alacritty_terminal::index::{Column, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Rgb;
 use alacritty_terminal::term::{RenderableCell, RenderableCellContent, SizeInfo};
@@ -19,7 +18,7 @@ use crate::renderer::rects::{RenderLine, RenderRect};
 pub struct Url {
     lines: Vec<RenderLine>,
     end_offset: u16,
-    num_cols: usize,
+    num_cols: Column,
 }
 
 impl Url {
@@ -42,7 +41,7 @@ impl Url {
     }
 
     pub fn end(&self) -> Point {
-        self.lines[self.lines.len() - 1].end.sub(self.num_cols, self.end_offset as usize, false)
+        self.lines[self.lines.len() - 1].end.sub(self.num_cols, self.end_offset as usize)
     }
 }
 
@@ -71,9 +70,9 @@ impl Urls {
         Self::default()
     }
 
-    // Update tracked URLs
-    pub fn update(&mut self, num_cols: usize, cell: RenderableCell) {
-        // Convert cell to character
+    // Update tracked URLs.
+    pub fn update(&mut self, num_cols: Column, cell: RenderableCell) {
+        // Convert cell to character.
         let c = match cell.inner {
             RenderableCellContent::Chars(chars) => chars[0],
             RenderableCellContent::Cursor(_) => return,
@@ -82,15 +81,15 @@ impl Urls {
         let point: Point = cell.into();
         let end = point;
 
-        // Reset URL when empty cells have been skipped
-        if point != Point::default() && Some(point.sub(num_cols, 1, false)) != self.last_point {
+        // Reset URL when empty cells have been skipped.
+        if point != Point::default() && Some(point.sub(num_cols, 1)) != self.last_point {
             self.reset();
         }
 
         self.last_point = Some(end);
 
-        // Extend current state if a wide char spacer is encountered
-        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+        // Extend current state if a wide char spacer is encountered.
+        if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
             if let UrlLocation::Url(_, mut end_offset) = self.state {
                 if end_offset != 0 {
                     end_offset += 1;
@@ -102,20 +101,20 @@ impl Urls {
             return;
         }
 
-        // Advance parser
+        // Advance parser.
         let last_state = mem::replace(&mut self.state, self.locator.advance(c));
         match (self.state, last_state) {
             (UrlLocation::Url(_length, end_offset), UrlLocation::Scheme) => {
-                // Create empty URL
+                // Create empty URL.
                 self.urls.push(Url { lines: Vec::new(), end_offset, num_cols });
 
-                // Push schemes into URL
+                // Push schemes into URL.
                 for scheme_cell in self.scheme_buffer.split_off(0) {
                     let point = scheme_cell.into();
                     self.extend_url(point, point, scheme_cell.fg, end_offset);
                 }
 
-                // Push the new cell into URL
+                // Push the new cell into URL.
                 self.extend_url(point, end, cell.fg, end_offset);
             },
             (UrlLocation::Url(_length, end_offset), UrlLocation::Url(..)) => {
@@ -126,27 +125,28 @@ impl Urls {
             _ => (),
         }
 
-        // Reset at un-wrapped linebreak
-        if cell.column.0 + 1 == num_cols && !cell.flags.contains(Flags::WRAPLINE) {
+        // Reset at un-wrapped linebreak.
+        if cell.column + 1 == num_cols && !cell.flags.contains(Flags::WRAPLINE) {
             self.reset();
         }
     }
 
-    // Extend the last URL
+    /// Extend the last URL.
     fn extend_url(&mut self, start: Point, end: Point, color: Rgb, end_offset: u16) {
         let url = self.urls.last_mut().unwrap();
 
-        // If color changed, we need to insert a new line
+        // If color changed, we need to insert a new line.
         if url.lines.last().map(|last| last.color) == Some(color) {
             url.lines.last_mut().unwrap().end = end;
         } else {
             url.lines.push(RenderLine { color, start, end });
         }
 
-        // Update excluded cells at the end of the URL
+        // Update excluded cells at the end of the URL.
         url.end_offset = end_offset;
     }
 
+    /// Find URL below the mouse cursor.
     pub fn highlighted(
         &self,
         config: &Config,
@@ -155,15 +155,15 @@ impl Urls {
         mouse_mode: bool,
         selection: bool,
     ) -> Option<Url> {
-        // Require additional shift in mouse mode
+        // Require additional shift in mouse mode.
         let mut required_mods = config.ui_config.mouse.url.mods();
         if mouse_mode {
             required_mods |= ModifiersState::SHIFT;
         }
 
-        // Make sure all prerequisites for highlighting are met
+        // Make sure all prerequisites for highlighting are met.
         if selection
-            || !mouse.inside_grid
+            || !mouse.inside_text_area
             || config.ui_config.mouse.url.launcher.is_none()
             || required_mods != mods
             || mouse.left_button_state == ElementState::Pressed
@@ -171,12 +171,16 @@ impl Urls {
             return None;
         }
 
+        self.find_at(Point::new(mouse.line, mouse.column))
+    }
+
+    /// Find URL at location.
+    pub fn find_at(&self, point: Point) -> Option<Url> {
         for url in &self.urls {
-            if (url.start()..=url.end()).contains(&Point::new(mouse.line, mouse.column)) {
+            if (url.start()..=url.end()).contains(&point) {
                 return Some(url.clone());
             }
         }
-
         None
     }
 
@@ -188,7 +192,7 @@ impl Urls {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     use alacritty_terminal::index::{Column, Line};
@@ -219,7 +223,7 @@ mod test {
         let mut urls = Urls::new();
 
         for cell in input {
-            urls.update(num_cols, cell);
+            urls.update(Column(num_cols), cell);
         }
 
         let url = urls.urls.first().unwrap();
@@ -235,7 +239,7 @@ mod test {
         let mut urls = Urls::new();
 
         for cell in input {
-            urls.update(num_cols, cell);
+            urls.update(Column(num_cols), cell);
         }
 
         assert_eq!(urls.urls.len(), 3);

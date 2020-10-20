@@ -1,69 +1,56 @@
-// Copyright 2016 Joe Wilm, The Alacritty Project Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 use std::collections::HashMap;
-use std::fs::File;
+use std::fmt::{self, Display, Formatter};
+use std::fs;
 use std::hash::BuildHasherDefault;
-use std::io::{self, Read};
+use std::io;
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use fnv::FnvHasher;
-use font::{
-    self, BitmapBuffer, FontDesc, FontKey, GlyphKey, Rasterize, RasterizedGlyph, Rasterizer,
+use crossfont::{
+    BitmapBuffer, FontDesc, FontKey, GlyphKey, Rasterize, RasterizedGlyph, Rasterizer, Size, Slant,
+    Style, Weight,
 };
+use fnv::FnvHasher;
 use log::{error, info};
 use notify::{watcher, DebouncedEvent, RecursiveMode, Watcher};
 
+use alacritty_terminal::config::Cursor;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::{self, Flags};
+use alacritty_terminal::term::color::Rgb;
+use alacritty_terminal::term::{CursorKey, RenderableCell, RenderableCellContent, SizeInfo};
+use alacritty_terminal::thread;
+
+use crate::config::font::{Font, FontDescription};
+use crate::config::ui_config::{Delta, UIConfig};
 use crate::cursor;
 use crate::gl;
 use crate::gl::types::*;
 use crate::renderer::rects::RenderRect;
-use alacritty_terminal::config::{self, Config, Delta, Font, StartupMode};
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::{self, Flags};
-use alacritty_terminal::term::color::Rgb;
-use alacritty_terminal::term::{self, CursorKey, RenderableCell, RenderableCellContent, SizeInfo};
-use alacritty_terminal::util;
-use std::fmt::{self, Display, Formatter};
 
 pub mod rects;
 
-// Shader paths for live reload
-static TEXT_SHADER_F_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../res/text.f.glsl");
-static TEXT_SHADER_V_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../res/text.v.glsl");
-static RECT_SHADER_F_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../res/rect.f.glsl");
-static RECT_SHADER_V_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../res/rect.v.glsl");
+// Shader paths for live reload.
+static TEXT_SHADER_F_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/text.f.glsl");
+static TEXT_SHADER_V_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/text.v.glsl");
+static RECT_SHADER_F_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/rect.f.glsl");
+static RECT_SHADER_V_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/res/rect.v.glsl");
 
-// Shader source which is used when live-shader-reload feature is disable
-static TEXT_SHADER_F: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../res/text.f.glsl"));
-static TEXT_SHADER_V: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../res/text.v.glsl"));
-static RECT_SHADER_F: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../res/rect.f.glsl"));
-static RECT_SHADER_V: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../res/rect.v.glsl"));
+// Shader source which is used when live-shader-reload feature is disable.
+static TEXT_SHADER_F: &str = include_str!("../../res/text.f.glsl");
+static TEXT_SHADER_V: &str = include_str!("../../res/text.v.glsl");
+static RECT_SHADER_F: &str = include_str!("../../res/rect.f.glsl");
+static RECT_SHADER_V: &str = include_str!("../../res/rect.v.glsl");
 
-/// `LoadGlyph` allows for copying a rasterized glyph into graphics memory
+/// `LoadGlyph` allows for copying a rasterized glyph into graphics memory.
 pub trait LoadGlyph {
-    /// Load the rasterized glyph into GPU memory
+    /// Load the rasterized glyph into GPU memory.
     fn load_glyph(&mut self, rasterized: &RasterizedGlyph) -> Glyph;
 
-    /// Clear any state accumulated from previous loaded glyphs
+    /// Clear any state accumulated from previous loaded glyphs.
     ///
     /// This can, for instance, be used to reset the texture Atlas.
     fn clear(&mut self);
@@ -88,7 +75,11 @@ impl std::error::Error for Error {
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "There was an error initializing the shaders: {}", self)
+        match self {
+            Error::ShaderCreation(err) => {
+                write!(f, "There was an error initializing the shaders: {}", err)
+            },
+        }
     }
 }
 
@@ -98,92 +89,93 @@ impl From<ShaderCreationError> for Error {
     }
 }
 
-/// Text drawing program
+/// Text drawing program.
 ///
 /// Uniforms are prefixed with "u", and vertex attributes are prefixed with "a".
 #[derive(Debug)]
 pub struct TextShaderProgram {
-    // Program id
+    /// Program id.
     id: GLuint,
 
-    /// projection scale and offset uniform
+    /// Projection scale and offset uniform.
     u_projection: GLint,
 
-    /// Cell dimensions (pixels)
+    /// Cell dimensions (pixels).
     u_cell_dim: GLint,
 
-    /// Background pass flag
+    /// Background pass flag.
     ///
-    /// Rendering is split into two passes; 1 for backgrounds, and one for text
+    /// Rendering is split into two passes; 1 for backgrounds, and one for text.
     u_background: GLint,
 }
 
-/// Rectangle drawing program
+/// Rectangle drawing program.
 ///
-/// Uniforms are prefixed with "u"
+/// Uniforms are prefixed with "u".
 #[derive(Debug)]
 pub struct RectShaderProgram {
-    // Program id
+    /// Program id.
     id: GLuint,
-    /// Rectangle color
+    /// Rectangle color.
     u_color: GLint,
 }
 
 #[derive(Copy, Debug, Clone)]
 pub struct Glyph {
     tex_id: GLuint,
-    colored: bool,
-    top: f32,
-    left: f32,
-    width: f32,
-    height: f32,
+    multicolor: u8,
+    top: i16,
+    left: i16,
+    width: i16,
+    height: i16,
     uv_bot: f32,
     uv_left: f32,
     uv_width: f32,
     uv_height: f32,
 }
 
-/// Naïve glyph cache
+/// Naïve glyph cache.
 ///
 /// Currently only keyed by `char`, and thus not possible to hold different
 /// representations of the same code point.
 pub struct GlyphCache {
-    /// Cache of buffered glyphs
+    /// Cache of buffered glyphs.
     cache: HashMap<GlyphKey, Glyph, BuildHasherDefault<FnvHasher>>,
 
-    /// Cache of buffered cursor glyphs
+    /// Cache of buffered cursor glyphs.
     cursor_cache: HashMap<CursorKey, Glyph, BuildHasherDefault<FnvHasher>>,
 
-    /// Rasterizer for loading new glyphs
+    /// Rasterizer for loading new glyphs.
     rasterizer: Rasterizer,
 
-    /// regular font
+    /// Regular font.
     font_key: FontKey,
 
-    /// bold font
+    /// Bold font.
     bold_key: FontKey,
 
-    /// italic font
+    /// Italic font.
     italic_key: FontKey,
 
-    /// bold italic font
+    /// Bold italic font.
     bold_italic_key: FontKey,
 
-    /// font size
-    font_size: font::Size,
+    /// Font size.
+    font_size: crossfont::Size,
 
-    /// glyph offset
+    /// Glyph offset.
     glyph_offset: Delta<i8>,
 
-    metrics: font::Metrics,
+    /// Font metrics.
+    metrics: crossfont::Metrics,
 }
 
 impl GlyphCache {
     pub fn new<L>(
         mut rasterizer: Rasterizer,
-        font: &config::Font,
+        font: &Font,
         loader: &mut L,
-    ) -> Result<GlyphCache, font::Error>
+    ) -> Result<GlyphCache, crossfont::Error>
     where
         L: LoadGlyph,
     {
@@ -209,10 +201,7 @@ impl GlyphCache {
             metrics,
         };
 
-        cache.load_glyphs_for_font(regular, loader);
-        cache.load_glyphs_for_font(bold, loader);
-        cache.load_glyphs_for_font(italic, loader);
-        cache.load_glyphs_for_font(bold_italic, loader);
+        cache.load_common_glyphs(loader);
 
         Ok(cache)
     }
@@ -224,57 +213,67 @@ impl GlyphCache {
         }
     }
 
-    /// Computes font keys for (Regular, Bold, Italic, Bold Italic)
+    /// Computes font keys for (Regular, Bold, Italic, Bold Italic).
     fn compute_font_keys(
-        font: &config::Font,
+        font: &Font,
         rasterizer: &mut Rasterizer,
-    ) -> Result<(FontKey, FontKey, FontKey, FontKey), font::Error> {
+    ) -> Result<(FontKey, FontKey, FontKey, FontKey), crossfont::Error> {
         let size = font.size;
 
-        // Load regular font
-        let regular_desc =
-            Self::make_desc(&font.normal(), font::Slant::Normal, font::Weight::Normal);
+        // Load regular font.
+        let regular_desc = Self::make_desc(&font.normal(), Slant::Normal, Weight::Normal);
 
-        let regular = rasterizer.load_font(&regular_desc, size)?;
+        let regular = Self::load_regular_font(rasterizer, &regular_desc, size)?;
 
-        // helper to load a description if it is not the regular_desc
+        // Helper to load a description if it is not the `regular_desc`.
         let mut load_or_regular = |desc: FontDesc| {
             if desc == regular_desc {
                 regular
             } else {
-                rasterizer.load_font(&desc, size).unwrap_or_else(|_| regular)
+                rasterizer.load_font(&desc, size).unwrap_or(regular)
             }
         };
 
-        // Load bold font
-        let bold_desc = Self::make_desc(&font.bold(), font::Slant::Normal, font::Weight::Bold);
+        // Load bold font.
+        let bold_desc = Self::make_desc(&font.bold(), Slant::Normal, Weight::Bold);
 
         let bold = load_or_regular(bold_desc);
 
-        // Load italic font
-        let italic_desc =
-            Self::make_desc(&font.italic(), font::Slant::Italic, font::Weight::Normal);
+        // Load italic font.
+        let italic_desc = Self::make_desc(&font.italic(), Slant::Italic, Weight::Normal);
 
         let italic = load_or_regular(italic_desc);
 
-        // Load bold italic font
-        let bold_italic_desc =
-            Self::make_desc(&font.bold_italic(), font::Slant::Italic, font::Weight::Bold);
+        // Load bold italic font.
+        let bold_italic_desc = Self::make_desc(&font.bold_italic(), Slant::Italic, Weight::Bold);
 
         let bold_italic = load_or_regular(bold_italic_desc);
 
         Ok((regular, bold, italic, bold_italic))
     }
 
-    fn make_desc(
-        desc: &config::FontDescription,
-        slant: font::Slant,
-        weight: font::Weight,
-    ) -> FontDesc {
+    fn load_regular_font(
+        rasterizer: &mut Rasterizer,
+        description: &FontDesc,
+        size: Size,
+    ) -> Result<FontKey, crossfont::Error> {
+        match rasterizer.load_font(description, size) {
+            Ok(font) => Ok(font),
+            Err(err) => {
+                error!("{}", err);
+
+                let fallback_desc =
+                    Self::make_desc(&Font::default().normal(), Slant::Normal, Weight::Normal);
+                rasterizer.load_font(&fallback_desc, size)
+            },
+        }
+    }
+
+    fn make_desc(desc: &FontDescription, slant: Slant, weight: Weight) -> FontDesc {
         let style = if let Some(ref spec) = desc.style {
-            font::Style::Specific(spec.to_owned())
+            Style::Specific(spec.to_owned())
         } else {
-            font::Style::Description { slant, weight }
+            Style::Description { slant, weight }
         };
         FontDesc::new(desc.family.clone(), style)
     }
@@ -298,23 +297,27 @@ impl GlyphCache {
         })
     }
 
-    pub fn update_font_size<L: LoadGlyph>(
-        &mut self,
-        font: config::Font,
-        dpr: f64,
-        loader: &mut L,
-    ) -> Result<(), font::Error> {
-        // Clear currently cached data in both GL and the registry
+    /// Clear currently cached data in both GL and the registry.
+    pub fn clear_glyph_cache<L: LoadGlyph>(&mut self, loader: &mut L) {
         loader.clear();
         self.cache = HashMap::default();
         self.cursor_cache = HashMap::default();
 
-        // Update dpi scaling
+        self.load_common_glyphs(loader);
+    }
+
+    pub fn update_font_size<L: LoadGlyph>(
+        &mut self,
+        font: &Font,
+        dpr: f64,
+        loader: &mut L,
+    ) -> Result<(), crossfont::Error> {
+        // Update dpi scaling.
         self.rasterizer.update_dpr(dpr as f32);
 
-        // Recompute font keys
+        // Recompute font keys.
         let (regular, bold, italic, bold_italic) =
-            Self::compute_font_keys(&font, &mut self.rasterizer)?;
+            Self::compute_font_keys(font, &mut self.rasterizer)?;
 
         self.rasterizer.get_glyph(GlyphKey { font_key: regular, c: 'm', size: font.size })?;
         let metrics = self.rasterizer.metrics(regular, font.size)?;
@@ -328,87 +331,63 @@ impl GlyphCache {
         self.bold_italic_key = bold_italic;
         self.metrics = metrics;
 
-        self.load_glyphs_for_font(regular, loader);
-        self.load_glyphs_for_font(bold, loader);
-        self.load_glyphs_for_font(italic, loader);
-        self.load_glyphs_for_font(bold_italic, loader);
+        self.clear_glyph_cache(loader);
 
         Ok(())
     }
 
-    pub fn font_metrics(&self) -> font::Metrics {
-        self.rasterizer
-            .metrics(self.font_key, self.font_size)
-            .expect("metrics load since font is loaded at glyph cache creation")
+    pub fn font_metrics(&self) -> crossfont::Metrics {
+        self.metrics
     }
 
-    // Calculate font metrics without access to a glyph cache
-    pub fn static_metrics(font: Font, dpr: f64) -> Result<font::Metrics, font::Error> {
-        let mut rasterizer = font::Rasterizer::new(dpr as f32, font.use_thin_strokes())?;
-        let regular_desc =
-            GlyphCache::make_desc(&font.normal(), font::Slant::Normal, font::Weight::Normal);
-        let regular = rasterizer.load_font(&regular_desc, font.size)?;
+    /// Prefetch glyphs that are almost guaranteed to be loaded anyways.
+    fn load_common_glyphs<L: LoadGlyph>(&mut self, loader: &mut L) {
+        self.load_glyphs_for_font(self.font_key, loader);
+        self.load_glyphs_for_font(self.bold_italic_key, loader);
+        self.load_glyphs_for_font(self.italic_key, loader);
+        self.load_glyphs_for_font(self.bold_italic_key, loader);
+    }
+
+    /// Calculate font metrics without access to a glyph cache.
+    pub fn static_metrics(font: Font, dpr: f64) -> Result<crossfont::Metrics, crossfont::Error> {
+        let mut rasterizer = crossfont::Rasterizer::new(dpr as f32, font.use_thin_strokes())?;
+        let regular_desc = GlyphCache::make_desc(&font.normal(), Slant::Normal, Weight::Normal);
+        let regular = Self::load_regular_font(&mut rasterizer, &regular_desc, font.size)?;
         rasterizer.get_glyph(GlyphKey { font_key: regular, c: 'm', size: font.size })?;
 
         rasterizer.metrics(regular, font.size)
-    }
-
-    pub fn calculate_dimensions<C>(
-        config: &Config<C>,
-        dpr: f64,
-        cell_width: f32,
-        cell_height: f32,
-    ) -> Option<(u32, u32)> {
-        let dimensions = config.window.dimensions;
-
-        if dimensions.columns_u32() == 0
-            || dimensions.lines_u32() == 0
-            || config.window.startup_mode() != StartupMode::Windowed
-        {
-            return None;
-        }
-
-        let padding_x = f64::from(config.window.padding.x) * dpr;
-        let padding_y = f64::from(config.window.padding.y) * dpr;
-
-        // Calculate new size based on cols/lines specified in config
-        let grid_width = cell_width as u32 * dimensions.columns_u32();
-        let grid_height = cell_height as u32 * dimensions.lines_u32();
-
-        let width = padding_x.mul_add(2., f64::from(grid_width)).floor();
-        let height = padding_y.mul_add(2., f64::from(grid_height)).floor();
-
-        Some((width as u32, height as u32))
     }
 }
 
 #[derive(Debug)]
 #[repr(C)]
 struct InstanceData {
-    // coords
-    col: f32,
-    row: f32,
-    // glyph offset
-    left: f32,
-    top: f32,
-    // glyph scale
-    width: f32,
-    height: f32,
-    // uv offset
+    // Coords.
+    col: u16,
+    row: u16,
+    // Glyph offset.
+    left: i16,
+    top: i16,
+    // Glyph size.
+    width: i16,
+    height: i16,
+    // UV offset.
     uv_left: f32,
     uv_bot: f32,
-    // uv scale
+    // uv scale.
     uv_width: f32,
     uv_height: f32,
-    // color
-    r: f32,
-    g: f32,
-    b: f32,
-    // background color
-    bg_r: f32,
-    bg_g: f32,
-    bg_b: f32,
-    bg_a: f32,
+    // Color.
+    r: u8,
+    g: u8,
+    b: u8,
+    // Flag indicating that a glyph uses multiple colors; like an Emoji.
+    multicolor: u8,
+    // Background color.
+    bg_r: u8,
+    bg_g: u8,
+    bg_b: u8,
+    bg_a: u8,
 }
 
 #[derive(Debug)]
@@ -428,13 +407,14 @@ pub struct QuadRenderer {
 }
 
 #[derive(Debug)]
-pub struct RenderApi<'a, C> {
+pub struct RenderApi<'a> {
     active_tex: &'a mut GLuint,
     batch: &'a mut Batch,
     atlas: &'a mut Vec<Atlas>,
     current_atlas: &'a mut usize,
     program: &'a mut TextShaderProgram,
-    config: &'a Config<C>,
+    config: &'a UIConfig,
+    cursor_config: Cursor,
 }
 
 #[derive(Debug)]
@@ -456,22 +436,14 @@ impl Batch {
         Self { tex: 0, instances: Vec::with_capacity(BATCH_MAX) }
     }
 
-    pub fn add_item(&mut self, mut cell: RenderableCell, glyph: &Glyph) {
+    pub fn add_item(&mut self, cell: RenderableCell, glyph: &Glyph) {
         if self.is_empty() {
             self.tex = glyph.tex_id;
         }
 
-        if glyph.colored {
-            // XXX Temporary workaround to prevent emojis being rendered with a wrong colors on, at
-            // least, dark backgrounds. For more info see #1864.
-            cell.fg.r = 255;
-            cell.fg.g = 255;
-            cell.fg.b = 255;
-        }
-
         self.instances.push(InstanceData {
-            col: cell.column.0 as f32,
-            row: cell.line.0 as f32,
+            col: cell.column.0 as u16,
+            row: cell.line.0 as u16,
 
             top: glyph.top,
             left: glyph.left,
@@ -483,14 +455,15 @@ impl Batch {
             uv_width: glyph.uv_width,
             uv_height: glyph.uv_height,
 
-            r: f32::from(cell.fg.r),
-            g: f32::from(cell.fg.g),
-            b: f32::from(cell.fg.b),
+            r: cell.fg.r,
+            g: cell.fg.g,
+            b: cell.fg.b,
 
-            bg_r: f32::from(cell.bg.r),
-            bg_g: f32::from(cell.bg.g),
-            bg_b: f32::from(cell.bg.b),
-            bg_a: cell.bg_alpha,
+            bg_r: cell.bg.r,
+            bg_g: cell.bg.g,
+            bg_b: cell.bg.b,
+            bg_a: (cell.bg_alpha * 255.0) as u8,
+            multicolor: glyph.multicolor,
         });
     }
 
@@ -548,7 +521,7 @@ impl QuadRenderer {
             gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
             gl::Enable(gl::MULTISAMPLE);
 
-            // Disable depth mask, as the renderer never uses depth tests
+            // Disable depth mask, as the renderer never uses depth tests.
             gl::DepthMask(gl::FALSE);
 
             gl::GenVertexArrays(1, &mut vao);
@@ -579,63 +552,51 @@ impl QuadRenderer {
                 ptr::null(),
                 gl::STREAM_DRAW,
             );
-            // coords
-            gl::VertexAttribPointer(
-                0,
-                2,
-                gl::FLOAT,
-                gl::FALSE,
-                size_of::<InstanceData>() as i32,
-                ptr::null(),
-            );
-            gl::EnableVertexAttribArray(0);
-            gl::VertexAttribDivisor(0, 1);
-            // glyphoffset
-            gl::VertexAttribPointer(
-                1,
-                4,
-                gl::FLOAT,
-                gl::FALSE,
-                size_of::<InstanceData>() as i32,
-                (2 * size_of::<f32>()) as *const _,
-            );
-            gl::EnableVertexAttribArray(1);
-            gl::VertexAttribDivisor(1, 1);
-            // uv
-            gl::VertexAttribPointer(
-                2,
-                4,
-                gl::FLOAT,
-                gl::FALSE,
-                size_of::<InstanceData>() as i32,
-                (6 * size_of::<f32>()) as *const _,
-            );
-            gl::EnableVertexAttribArray(2);
-            gl::VertexAttribDivisor(2, 1);
-            // color
-            gl::VertexAttribPointer(
-                3,
-                3,
-                gl::FLOAT,
-                gl::FALSE,
-                size_of::<InstanceData>() as i32,
-                (10 * size_of::<f32>()) as *const _,
-            );
-            gl::EnableVertexAttribArray(3);
-            gl::VertexAttribDivisor(3, 1);
-            // color
-            gl::VertexAttribPointer(
-                4,
-                4,
-                gl::FLOAT,
-                gl::FALSE,
-                size_of::<InstanceData>() as i32,
-                (13 * size_of::<f32>()) as *const _,
-            );
-            gl::EnableVertexAttribArray(4);
-            gl::VertexAttribDivisor(4, 1);
 
-            // Rectangle setup
+            let mut index = 0;
+            let mut size = 0;
+
+            macro_rules! add_attr {
+                ($count:expr, $gl_type:expr, $type:ty) => {
+                    gl::VertexAttribPointer(
+                        index,
+                        $count,
+                        $gl_type,
+                        gl::FALSE,
+                        size_of::<InstanceData>() as i32,
+                        size as *const _,
+                    );
+                    gl::EnableVertexAttribArray(index);
+                    gl::VertexAttribDivisor(index, 1);
+
+                    #[allow(unused_assignments)]
+                    {
+                        size += $count * size_of::<$type>();
+                        index += 1;
+                    }
+                };
+            }
+
+            // Coords.
+            add_attr!(2, gl::UNSIGNED_SHORT, u16);
+
+            // Glyph offset and size.
+            add_attr!(4, gl::SHORT, i16);
+
+            // UV offset.
+            add_attr!(4, gl::FLOAT, f32);
+
+            // Color and multicolor flag.
+            //
+            // These are packed together because of an OpenGL driver issue on macOS, which caused a
+            // `vec3(u8)` text color and a `u8` multicolor flag to increase the rendering time by a
+            // huge margin.
+            add_attr!(4, gl::UNSIGNED_BYTE, u8);
+
+            // Background color.
+            add_attr!(4, gl::UNSIGNED_BYTE, u8);
+
+            // Rectangle setup.
             gl::GenVertexArrays(1, &mut rect_vao);
             gl::GenBuffers(1, &mut rect_vbo);
             gl::GenBuffers(1, &mut rect_ebo);
@@ -649,7 +610,7 @@ impl QuadRenderer {
                 gl::STATIC_DRAW,
             );
 
-            // Cleanup
+            // Cleanup.
             gl::BindVertexArray(0);
             gl::BindBuffer(gl::ARRAY_BUFFER, 0);
             gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, 0);
@@ -658,7 +619,7 @@ impl QuadRenderer {
         let (msg_tx, msg_rx) = mpsc::channel();
 
         if cfg!(feature = "live-shader-reload") {
-            util::thread::spawn_named("live shader reload", move || {
+            thread::spawn_named("live shader reload", move || {
                 let (tx, rx) = std::sync::mpsc::channel();
                 // The Duration argument is a debouncing period.
                 let mut watcher =
@@ -707,24 +668,24 @@ impl QuadRenderer {
         Ok(renderer)
     }
 
-    // Draw all rectangles simultaneously to prevent excessive program swaps
-    pub fn draw_rects(&mut self, props: &term::SizeInfo, rects: Vec<RenderRect>) {
-        // Swap to rectangle rendering program
+    /// Draw all rectangles simultaneously to prevent excessive program swaps.
+    pub fn draw_rects(&mut self, props: &SizeInfo, rects: Vec<RenderRect>) {
+        // Swap to rectangle rendering program.
         unsafe {
-            // Swap program
+            // Swap program.
             gl::UseProgram(self.rect_program.id);
 
-            // Remove padding from viewport
-            gl::Viewport(0, 0, props.width as i32, props.height as i32);
+            // Remove padding from viewport.
+            gl::Viewport(0, 0, props.width() as i32, props.height() as i32);
 
-            // Change blending strategy
+            // Change blending strategy.
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
 
-            // Setup data and buffers
+            // Setup data and buffers.
             gl::BindVertexArray(self.rect_vao);
             gl::BindBuffer(gl::ARRAY_BUFFER, self.rect_vbo);
 
-            // Position
+            // Position.
             gl::VertexAttribPointer(
                 0,
                 2,
@@ -736,40 +697,46 @@ impl QuadRenderer {
             gl::EnableVertexAttribArray(0);
         }
 
-        // Draw all the rects
+        // Draw all the rects.
         for rect in rects {
             self.render_rect(&rect, props);
         }
 
-        // Deactivate rectangle program again
+        // Deactivate rectangle program again.
         unsafe {
-            // Reset blending strategy
+            // Reset blending strategy.
             gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
 
-            // Reset data and buffers
+            // Reset data and buffers.
             gl::BindBuffer(gl::ARRAY_BUFFER, 0);
             gl::BindVertexArray(0);
 
-            let padding_x = props.padding_x as i32;
-            let padding_y = props.padding_y as i32;
-            let width = props.width as i32;
-            let height = props.height as i32;
+            let padding_x = props.padding_x() as i32;
+            let padding_y = props.padding_y() as i32;
+            let width = props.width() as i32;
+            let height = props.height() as i32;
             gl::Viewport(padding_x, padding_y, width - 2 * padding_x, height - 2 * padding_y);
 
-            // Disable program
+            // Disable program.
             gl::UseProgram(0);
         }
     }
 
-    pub fn with_api<F, T, C>(&mut self, config: &Config<C>, props: &term::SizeInfo, func: F) -> T
+    pub fn with_api<F, T>(
+        &mut self,
+        config: &UIConfig,
+        cursor_config: Cursor,
+        props: &SizeInfo,
+        func: F,
+    ) -> T
     where
-        F: FnOnce(RenderApi<'_, C>) -> T,
+        F: FnOnce(RenderApi<'_>) -> T,
     {
-        // Flush message queue
+        // Flush message queue.
         if let Ok(Msg::ShaderReload) = self.rx.try_recv() {
             self.reload_shaders(props);
         }
-        while let Ok(_) = self.rx.try_recv() {}
+        while self.rx.try_recv().is_ok() {}
 
         unsafe {
             gl::UseProgram(self.program.id);
@@ -788,6 +755,7 @@ impl QuadRenderer {
             current_atlas: &mut self.current_atlas,
             program: &mut self.program,
             config,
+            cursor_config,
         });
 
         unsafe {
@@ -816,7 +784,7 @@ impl QuadRenderer {
         })
     }
 
-    pub fn reload_shaders(&mut self, props: &term::SizeInfo) {
+    pub fn reload_shaders(&mut self, props: &SizeInfo) {
         info!("Reloading shaders...");
         let result = (TextShaderProgram::new(), RectShaderProgram::new());
         let (program, rect_program) = match result {
@@ -824,10 +792,10 @@ impl QuadRenderer {
                 unsafe {
                     gl::UseProgram(program.id);
                     program.update_projection(
-                        props.width,
-                        props.height,
-                        props.padding_x,
-                        props.padding_y,
+                        props.width(),
+                        props.height(),
+                        props.padding_x(),
+                        props.padding_y(),
                     );
                     gl::UseProgram(0);
                 }
@@ -847,44 +815,49 @@ impl QuadRenderer {
     }
 
     pub fn resize(&mut self, size: &SizeInfo) {
-        // viewport
+        // Viewport.
         unsafe {
             gl::Viewport(
-                size.padding_x as i32,
-                size.padding_y as i32,
-                size.width as i32 - 2 * size.padding_x as i32,
-                size.height as i32 - 2 * size.padding_y as i32,
+                size.padding_x() as i32,
+                size.padding_y() as i32,
+                size.width() as i32 - 2 * size.padding_x() as i32,
+                size.height() as i32 - 2 * size.padding_y() as i32,
             );
 
-            // update projection
+            // Update projection.
             gl::UseProgram(self.program.id);
-            self.program.update_projection(size.width, size.height, size.padding_x, size.padding_y);
+            self.program.update_projection(
+                size.width(),
+                size.height(),
+                size.padding_x(),
+                size.padding_y(),
+            );
             gl::UseProgram(0);
         }
     }
 
-    // Render a rectangle
-    //
-    // This requires the rectangle program to be activated
-    fn render_rect(&mut self, rect: &RenderRect, size: &term::SizeInfo) {
-        // Do nothing when alpha is fully transparent
+    /// Render a rectangle.
+    ///
+    /// This requires the rectangle program to be activated.
+    fn render_rect(&mut self, rect: &RenderRect, size: &SizeInfo) {
+        // Do nothing when alpha is fully transparent.
         if rect.alpha == 0. {
             return;
         }
 
-        // Calculate rectangle position
-        let center_x = size.width / 2.;
-        let center_y = size.height / 2.;
+        // Calculate rectangle position.
+        let center_x = size.width() / 2.;
+        let center_y = size.height() / 2.;
         let x = (rect.x - center_x) / center_x;
         let y = -(rect.y - center_y) / center_y;
         let width = rect.width / center_x;
         let height = rect.height / center_y;
 
         unsafe {
-            // Setup vertices
+            // Setup vertices.
             let vertices: [f32; 8] = [x + width, y, x + width, y - height, x, y - height, x, y];
 
-            // Load vertex data into array buffer
+            // Load vertex data into array buffer.
             gl::BufferData(
                 gl::ARRAY_BUFFER,
                 (size_of::<f32>() * vertices.len()) as _,
@@ -892,16 +865,16 @@ impl QuadRenderer {
                 gl::STATIC_DRAW,
             );
 
-            // Color
+            // Color.
             self.rect_program.set_color(rect.color, rect.alpha);
 
-            // Draw the rectangle
+            // Draw the rectangle.
             gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_INT, ptr::null());
         }
     }
 }
 
-impl<'a, C> RenderApi<'a, C> {
+impl<'a> RenderApi<'a> {
     pub fn clear(&self, color: Rgb) {
         unsafe {
             let alpha = self.config.background_opacity();
@@ -915,6 +888,13 @@ impl<'a, C> RenderApi<'a, C> {
         }
     }
 
+    #[cfg(not(any(target_os = "macos", windows)))]
+    pub fn finish(&self) {
+        unsafe {
+            gl::Finish();
+        }
+    }
+
     fn render_batch(&mut self) {
         unsafe {
             gl::BufferSubData(
@@ -925,7 +905,7 @@ impl<'a, C> RenderApi<'a, C> {
             );
         }
 
-        // Bind texture if necessary
+        // Bind texture if necessary.
         if *self.active_tex != self.batch.tex {
             unsafe {
                 gl::BindTexture(gl::TEXTURE_2D, self.batch.tex);
@@ -959,29 +939,29 @@ impl<'a, C> RenderApi<'a, C> {
     /// errors.
     pub fn render_string(
         &mut self,
-        string: &str,
-        line: Line,
         glyph_cache: &mut GlyphCache,
-        color: Option<Rgb>,
+        line: Line,
+        string: &str,
+        fg: Rgb,
+        bg: Option<Rgb>,
     ) {
-        let bg_alpha = color.map(|_| 1.0).unwrap_or(0.0);
-        let col = Column(0);
+        let bg_alpha = bg.map(|_| 1.0).unwrap_or(0.0);
 
         let cells = string
             .chars()
             .enumerate()
             .map(|(i, c)| RenderableCell {
                 line,
-                column: col + i,
+                column: Column(i),
                 inner: RenderableCellContent::Chars({
                     let mut chars = [' '; cell::MAX_ZEROWIDTH_CHARS + 1];
                     chars[0] = c;
                     chars
                 }),
-                bg: color.unwrap_or(Rgb { r: 0, g: 0, b: 0 }),
-                fg: Rgb { r: 0, g: 0, b: 0 },
                 flags: Flags::empty(),
                 bg_alpha,
+                fg,
+                bg: bg.unwrap_or(Rgb { r: 0, g: 0, b: 0 }),
             })
             .collect::<Vec<_>>();
 
@@ -992,14 +972,14 @@ impl<'a, C> RenderApi<'a, C> {
 
     #[inline]
     fn add_render_item(&mut self, cell: RenderableCell, glyph: &Glyph) {
-        // Flush batch if tex changing
+        // Flush batch if tex changing.
         if !self.batch.is_empty() && self.batch.tex != glyph.tex_id {
             self.render_batch();
         }
 
         self.batch.add_item(cell, glyph);
 
-        // Render batch and clear if it's full
+        // Render batch and clear if it's full.
         if self.batch.full() {
             self.render_batch();
         }
@@ -1008,7 +988,7 @@ impl<'a, C> RenderApi<'a, C> {
     pub fn render_cell(&mut self, cell: RenderableCell, glyph_cache: &mut GlyphCache) {
         let chars = match cell.inner {
             RenderableCellContent::Cursor(cursor_key) => {
-                // Raw cell pixel buffers like cursors don't need to go through font lookup
+                // Raw cell pixel buffers like cursors don't need to go through font lookup.
                 let metrics = glyph_cache.metrics;
                 let glyph = glyph_cache.cursor_cache.entry(cursor_key).or_insert_with(|| {
                     self.load_glyph(&cursor::get_cursor_glyph(
@@ -1017,6 +997,7 @@ impl<'a, C> RenderApi<'a, C> {
                         self.config.font.offset.x,
                         self.config.font.offset.y,
                         cursor_key.is_wide,
+                        self.cursor_config.thickness(),
                     ))
                 });
                 self.add_render_item(cell, glyph);
@@ -1025,7 +1006,7 @@ impl<'a, C> RenderApi<'a, C> {
             RenderableCellContent::Chars(chars) => chars,
         };
 
-        // Get font key for cell
+        // Get font key for cell.
         let font_key = match cell.flags & Flags::BOLD_ITALIC {
             Flags::BOLD_ITALIC => glyph_cache.bold_italic_key,
             Flags::ITALIC => glyph_cache.italic_key,
@@ -1033,25 +1014,25 @@ impl<'a, C> RenderApi<'a, C> {
             _ => glyph_cache.font_key,
         };
 
-        // Don't render text of HIDDEN cells
+        // Don't render text of HIDDEN cells.
         let mut chars = if cell.flags.contains(Flags::HIDDEN) {
             [' '; cell::MAX_ZEROWIDTH_CHARS + 1]
         } else {
             chars
         };
 
-        // Render tabs as spaces in case the font doesn't support it
+        // Render tabs as spaces in case the font doesn't support it.
         if chars[0] == '\t' {
             chars[0] = ' ';
         }
 
         let mut glyph_key = GlyphKey { font_key, size: glyph_cache.font_size, c: chars[0] };
 
-        // Add cell to batch
+        // Add cell to batch.
         let glyph = glyph_cache.get(glyph_key, self);
         self.add_render_item(cell, glyph);
 
-        // Render zero-width characters
+        // Render zero-width characters.
         for c in (&chars[1..]).iter().filter(|c| **c != ' ') {
             glyph_key.c = *c;
             let mut glyph = *glyph_cache.get(glyph_key, self);
@@ -1061,14 +1042,14 @@ impl<'a, C> RenderApi<'a, C> {
             // right side of the preceding character. Since we render the
             // zero-width characters inside the preceding character, the
             // anchor has been moved to the right by one cell.
-            glyph.left += glyph_cache.metrics.average_advance as f32;
+            glyph.left += glyph_cache.metrics.average_advance as i16;
 
             self.add_render_item(cell, &glyph);
         }
     }
 }
 
-/// Load a glyph into a texture atlas
+/// Load a glyph into a texture atlas.
 ///
 /// If the current atlas is full, a new one will be created.
 #[inline]
@@ -1093,15 +1074,15 @@ fn load_glyph(
         },
         Err(AtlasInsertError::GlyphTooLarge) => Glyph {
             tex_id: atlas[*current_atlas].id,
-            colored: false,
-            top: 0.0,
-            left: 0.0,
-            width: 0.0,
-            height: 0.0,
-            uv_bot: 0.0,
-            uv_left: 0.0,
-            uv_width: 0.0,
-            uv_height: 0.0,
+            multicolor: 0,
+            top: 0,
+            left: 0,
+            width: 0,
+            height: 0,
+            uv_bot: 0.,
+            uv_left: 0.,
+            uv_width: 0.,
+            uv_height: 0.,
         },
     }
 }
@@ -1124,7 +1105,7 @@ impl<'a> LoadGlyph for LoaderApi<'a> {
     }
 }
 
-impl<'a, C> LoadGlyph for RenderApi<'a, C> {
+impl<'a> LoadGlyph for RenderApi<'a> {
     fn load_glyph(&mut self, rasterized: &RasterizedGlyph) -> Glyph {
         load_glyph(self.active_tex, self.atlas, self.current_atlas, rasterized)
     }
@@ -1134,7 +1115,7 @@ impl<'a, C> LoadGlyph for RenderApi<'a, C> {
     }
 }
 
-impl<'a, C> Drop for RenderApi<'a, C> {
+impl<'a> Drop for RenderApi<'a> {
     fn drop(&mut self) {
         if !self.batch.is_empty() {
             self.render_batch();
@@ -1201,12 +1182,12 @@ impl TextShaderProgram {
     }
 
     fn update_projection(&self, width: f32, height: f32, padding_x: f32, padding_y: f32) {
-        // Bounds check
+        // Bounds check.
         if (width as u32) < (2 * padding_x as u32) || (height as u32) < (2 * padding_y as u32) {
             return;
         }
 
-        // Compute scale and offset factors, from pixel to ndc space. Y is inverted
+        // Compute scale and offset factors, from pixel to ndc space. Y is inverted.
         //   [0, width - 2 * padding_x] to [-1, 1]
         //   [height - 2 * padding_y, 0] to [-1, 1]
         let scale_x = 2. / (width - 2. * padding_x);
@@ -1214,16 +1195,14 @@ impl TextShaderProgram {
         let offset_x = -1.;
         let offset_y = 1.;
 
-        info!("Width: {}, Height: {}", width, height);
-
         unsafe {
             gl::Uniform4f(self.u_projection, offset_x, offset_y, scale_x, scale_y);
         }
     }
 
-    fn set_term_uniforms(&self, props: &term::SizeInfo) {
+    fn set_term_uniforms(&self, props: &SizeInfo) {
         unsafe {
-            gl::Uniform2f(self.u_cell_dim, props.cell_width, props.cell_height);
+            gl::Uniform2f(self.u_cell_dim, props.cell_width(), props.cell_height());
         }
     }
 
@@ -1261,7 +1240,7 @@ impl RectShaderProgram {
             gl::UseProgram(program);
         }
 
-        // get uniform locations
+        // Get uniform locations.
         let u_color = unsafe { gl::GetUniformLocation(program, b"color\0".as_ptr() as *const _) };
 
         let shader = Self { id: program, u_color };
@@ -1319,7 +1298,7 @@ fn create_shader(
     let source = if let Some(src) = source {
         src
     } else {
-        from_disk = read_file(path)?;
+        from_disk = fs::read_to_string(path)?;
         &from_disk[..]
     };
 
@@ -1340,10 +1319,10 @@ fn create_shader(
     if success == GLint::from(gl::TRUE) {
         Ok(shader)
     } else {
-        // Read log
+        // Read log.
         let log = get_shader_info_log(shader);
 
-        // Cleanup
+        // Cleanup.
         unsafe {
             gl::DeleteShader(shader);
         }
@@ -1353,68 +1332,60 @@ fn create_shader(
 }
 
 fn get_program_info_log(program: GLuint) -> String {
-    // Get expected log length
+    // Get expected log length.
     let mut max_length: GLint = 0;
     unsafe {
         gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut max_length);
     }
 
-    // Read the info log
+    // Read the info log.
     let mut actual_length: GLint = 0;
     let mut buf: Vec<u8> = Vec::with_capacity(max_length as usize);
     unsafe {
         gl::GetProgramInfoLog(program, max_length, &mut actual_length, buf.as_mut_ptr() as *mut _);
     }
 
-    // Build a string
+    // Build a string.
     unsafe {
         buf.set_len(actual_length as usize);
     }
 
-    // XXX should we expect opengl to return garbage?
+    // XXX should we expect OpenGL to return garbage?
     String::from_utf8(buf).unwrap()
 }
 
 fn get_shader_info_log(shader: GLuint) -> String {
-    // Get expected log length
+    // Get expected log length.
     let mut max_length: GLint = 0;
     unsafe {
         gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut max_length);
     }
 
-    // Read the info log
+    // Read the info log.
     let mut actual_length: GLint = 0;
     let mut buf: Vec<u8> = Vec::with_capacity(max_length as usize);
     unsafe {
         gl::GetShaderInfoLog(shader, max_length, &mut actual_length, buf.as_mut_ptr() as *mut _);
     }
 
-    // Build a string
+    // Build a string.
     unsafe {
         buf.set_len(actual_length as usize);
     }
 
-    // XXX should we expect opengl to return garbage?
+    // XXX should we expect OpenGL to return garbage?
     String::from_utf8(buf).unwrap()
-}
-
-fn read_file(path: &str) -> Result<String, io::Error> {
-    let mut f = File::open(path)?;
-    let mut buf = String::new();
-    f.read_to_string(&mut buf)?;
-
-    Ok(buf)
 }
 
 #[derive(Debug)]
 pub enum ShaderCreationError {
-    /// Error reading file
+    /// Error reading file.
     Io(io::Error),
 
-    /// Error compiling shader
+    /// Error compiling shader.
     Compile(PathBuf, String),
 
-    /// Problem linking
+    /// Problem linking.
     Link(String),
 }
 
@@ -1430,7 +1401,7 @@ impl std::error::Error for ShaderCreationError {
 impl Display for ShaderCreationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            ShaderCreationError::Io(err) => write!(f, "Couldn't read shader: {}", err),
+            ShaderCreationError::Io(err) => write!(f, "Unable to read shader: {}", err),
             ShaderCreationError::Compile(path, log) => {
                 write!(f, "Failed compiling shader at {}: {}", path.display(), log)
             },
@@ -1445,7 +1416,7 @@ impl From<io::Error> for ShaderCreationError {
     }
 }
 
-/// Manages a single texture atlas
+/// Manages a single texture atlas.
 ///
 /// The strategy for filling an atlas looks roughly like this:
 ///
@@ -1465,13 +1436,13 @@ impl From<io::Error> for ShaderCreationError {
 /// ```
 #[derive(Debug)]
 struct Atlas {
-    /// Texture id for this atlas
+    /// Texture id for this atlas.
     id: GLuint,
 
-    /// Width of atlas
+    /// Width of atlas.
     width: i32,
 
-    /// Height of atlas
+    /// Height of atlas.
     height: i32,
 
     /// Left-most free pixel in a row.
@@ -1480,21 +1451,21 @@ struct Atlas {
     /// in a row.
     row_extent: i32,
 
-    /// Baseline for glyphs in the current row
+    /// Baseline for glyphs in the current row.
     row_baseline: i32,
 
-    /// Tallest glyph in current row
+    /// Tallest glyph in current row.
     ///
-    /// This is used as the advance when end of row is reached
+    /// This is used as the advance when end of row is reached.
     row_tallest: i32,
 }
 
-/// Error that can happen when inserting a texture to the Atlas
+/// Error that can happen when inserting a texture to the Atlas.
 enum AtlasInsertError {
-    /// Texture atlas is full
+    /// Texture atlas is full.
     Full,
 
-    /// The glyph cannot fit within a single texture
+    /// The glyph cannot fit within a single texture.
     GlyphTooLarge,
 }
 
@@ -1505,14 +1476,16 @@ impl Atlas {
             gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
             gl::GenTextures(1, &mut id);
             gl::BindTexture(gl::TEXTURE_2D, id);
+            // Use RGBA texture for both normal and emoji glyphs, since it has no performance
+            // impact.
             gl::TexImage2D(
                 gl::TEXTURE_2D,
                 0,
-                gl::RGB as i32,
+                gl::RGBA as i32,
                 size,
                 size,
                 0,
-                gl::RGB,
+                gl::RGBA,
                 gl::UNSIGNED_BYTE,
                 ptr::null(),
             );
@@ -1534,7 +1507,7 @@ impl Atlas {
         self.row_tallest = 0;
     }
 
-    /// Insert a RasterizedGlyph into the texture atlas
+    /// Insert a RasterizedGlyph into the texture atlas.
     pub fn insert(
         &mut self,
         glyph: &RasterizedGlyph,
@@ -1544,12 +1517,12 @@ impl Atlas {
             return Err(AtlasInsertError::GlyphTooLarge);
         }
 
-        // If there's not enough room in current row, go onto next one
+        // If there's not enough room in current row, go onto next one.
         if !self.room_in_row(glyph) {
             self.advance_row()?;
         }
 
-        // If there's still not room, there's nothing that can be done here.
+        // If there's still not room, there's nothing that can be done here..
         if !self.room_in_row(glyph) {
             return Err(AtlasInsertError::Full);
         }
@@ -1558,7 +1531,7 @@ impl Atlas {
         Ok(self.insert_inner(glyph, active_tex))
     }
 
-    /// Insert the glyph without checking for room
+    /// Insert the glyph without checking for room.
     ///
     /// Internal function for use once atlas has been checked for space. GL
     /// errors could still occur at this point if we were checking for them;
@@ -1568,19 +1541,19 @@ impl Atlas {
         let offset_x = self.row_extent;
         let height = glyph.height as i32;
         let width = glyph.width as i32;
-        let colored;
+        let multicolor;
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, self.id);
 
-            // Load data into OpenGL
+            // Load data into OpenGL.
             let (format, buf) = match &glyph.buf {
                 BitmapBuffer::RGB(buf) => {
-                    colored = false;
+                    multicolor = false;
                     (gl::RGB, buf)
                 },
                 BitmapBuffer::RGBA(buf) => {
-                    colored = true;
+                    multicolor = true;
                     (gl::RGBA, buf)
                 },
             };
@@ -1601,13 +1574,13 @@ impl Atlas {
             *active_tex = 0;
         }
 
-        // Update Atlas state
+        // Update Atlas state.
         self.row_extent = offset_x + width;
         if height > self.row_tallest {
             self.row_tallest = height;
         }
 
-        // Generate UV coordinates
+        // Generate UV coordinates.
         let uv_bot = offset_y as f32 / self.height as f32;
         let uv_left = offset_x as f32 / self.width as f32;
         let uv_height = height as f32 / self.height as f32;
@@ -1615,11 +1588,11 @@ impl Atlas {
 
         Glyph {
             tex_id: self.id,
-            colored,
-            top: glyph.top as f32,
-            width: width as f32,
-            height: height as f32,
-            left: glyph.left as f32,
+            multicolor: multicolor as u8,
+            top: glyph.top as i16,
+            left: glyph.left as i16,
+            width: width as i16,
+            height: height as i16,
             uv_bot,
             uv_left,
             uv_width,
@@ -1627,7 +1600,7 @@ impl Atlas {
         }
     }
 
-    /// Check if there's room in the current row for given glyph
+    /// Check if there's room in the current row for given glyph.
     fn room_in_row(&self, raw: &RasterizedGlyph) -> bool {
         let next_extent = self.row_extent + raw.width as i32;
         let enough_width = next_extent <= self.width;
@@ -1636,7 +1609,7 @@ impl Atlas {
         enough_width && enough_height
     }
 
-    /// Mark current row as finished and prepare to insert into the next row
+    /// Mark current row as finished and prepare to insert into the next row.
     fn advance_row(&mut self) -> Result<(), AtlasInsertError> {
         let advance_to = self.row_baseline + self.row_tallest;
         if self.height - advance_to <= 0 {

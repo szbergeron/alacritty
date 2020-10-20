@@ -1,46 +1,33 @@
-// Copyright 2016 Joe Wilm, The Alacritty Project Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 #![allow(clippy::enum_glob_use)]
 
-use std::fmt;
-use std::str::FromStr;
+use std::fmt::{self, Debug, Display};
 
 use glutin::event::VirtualKeyCode::*;
 use glutin::event::{ModifiersState, MouseButton, VirtualKeyCode};
-use log::error;
 use serde::de::Error as SerdeError;
 use serde::de::{self, MapAccess, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer};
+use serde_yaml::Value as SerdeValue;
 
-use alacritty_terminal::config::LOG_TARGET_CONFIG;
+use alacritty_terminal::config::Program;
 use alacritty_terminal::term::TermMode;
+use alacritty_terminal::vi_mode::ViMotion;
 
-/// Describes a state and action to take in that state
+/// Describes a state and action to take in that state.
 ///
-/// This is the shared component of `MouseBinding` and `KeyBinding`
+/// This is the shared component of `MouseBinding` and `KeyBinding`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding<T> {
-    /// Modifier keys required to activate binding
+    /// Modifier keys required to activate binding.
     pub mods: ModifiersState,
 
-    /// String to send to pty if mods and mode match
+    /// String to send to PTY if mods and mode match.
     pub action: Action,
 
-    /// Terminal mode required to activate binding
+    /// Terminal mode required to activate binding.
     pub mode: TermMode,
 
-    /// excluded terminal modes where the binding won't be activated
+    /// excluded terminal modes where the binding won't be activated.
     pub notmode: TermMode,
 
     /// This property is used as part of the trigger detection code.
@@ -49,35 +36,11 @@ pub struct Binding<T> {
     pub trigger: T,
 }
 
-/// Bindings that are triggered by a keyboard key
+/// Bindings that are triggered by a keyboard key.
 pub type KeyBinding = Binding<Key>;
 
-/// Bindings that are triggered by a mouse button
+/// Bindings that are triggered by a mouse button.
 pub type MouseBinding = Binding<MouseButton>;
-
-impl Default for KeyBinding {
-    fn default() -> KeyBinding {
-        KeyBinding {
-            mods: Default::default(),
-            action: Action::Esc(String::new()),
-            mode: TermMode::NONE,
-            notmode: TermMode::NONE,
-            trigger: Key::Keycode(A),
-        }
-    }
-}
-
-impl Default for MouseBinding {
-    fn default() -> MouseBinding {
-        MouseBinding {
-            mods: Default::default(),
-            action: Action::Esc(String::new()),
-            mode: TermMode::NONE,
-            notmode: TermMode::NONE,
-            trigger: MouseButton::Left,
-        }
-    }
-}
 
 impl<T: Eq> Binding<T> {
     #[inline]
@@ -86,28 +49,32 @@ impl<T: Eq> Binding<T> {
         // the most likely item to fail so prioritizing it here allows more
         // checks to be short circuited.
         self.trigger == *input
+            && self.mods == mods
             && mode.contains(self.mode)
             && !mode.intersects(self.notmode)
-            && (self.mods == mods)
     }
 
     #[inline]
     pub fn triggers_match(&self, binding: &Binding<T>) -> bool {
-        // Check the binding's key and modifiers
+        // Check the binding's key and modifiers.
         if self.trigger != binding.trigger || self.mods != binding.mods {
             return false;
         }
 
-        // Completely empty modes match all modes
-        if (self.mode.is_empty() && self.notmode.is_empty())
-            || (binding.mode.is_empty() && binding.notmode.is_empty())
-        {
-            return true;
+        let selfmode = if self.mode.is_empty() { TermMode::ANY } else { self.mode };
+        let bindingmode = if binding.mode.is_empty() { TermMode::ANY } else { binding.mode };
+
+        if !selfmode.intersects(bindingmode) {
+            return false;
         }
 
-        // Check for intersection (equality is required since empty does not intersect itself)
-        (self.mode == binding.mode || self.mode.intersects(binding.mode))
-            && (self.notmode == binding.notmode || self.notmode.intersects(binding.notmode))
+        // The bindings are never active at the same time when the required modes of one binding
+        // are part of the forbidden bindings of the other.
+        if self.mode.intersects(binding.notmode) || binding.mode.intersects(self.notmode) {
+            return false;
+        }
+
+        true
     }
 }
 
@@ -117,11 +84,27 @@ pub enum Action {
     #[serde(skip)]
     Esc(String),
 
+    /// Run given command.
+    #[serde(skip)]
+    Command(Program),
+
+    /// Move vi mode cursor.
+    #[serde(skip)]
+    ViMotion(ViMotion),
+
+    /// Perform vi mode action.
+    #[serde(skip)]
+    ViAction(ViAction),
+
     /// Paste contents of system clipboard.
     Paste,
 
     /// Store current selection into clipboard.
     Copy,
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    /// Store current selection into selection buffer.
+    CopySelection,
 
     /// Paste contents of selection buffer.
     PasteSelection,
@@ -141,6 +124,12 @@ pub enum Action {
     /// Scroll exactly one page down.
     ScrollPageDown,
 
+    /// Scroll half a page up.
+    ScrollHalfPageUp,
+
+    /// Scroll half a page down.
+    ScrollHalfPageDown,
+
     /// Scroll one line up.
     ScrollLineUp,
 
@@ -155,10 +144,6 @@ pub enum Action {
 
     /// Clear the display buffer(s) to remove history.
     ClearHistory,
-
-    /// Run given command.
-    #[serde(skip)]
-    Command(String, Vec<String>),
 
     /// Hide the Alacritty window.
     Hide,
@@ -178,26 +163,78 @@ pub enum Action {
     /// Toggle fullscreen.
     ToggleFullscreen,
 
-    /// Toggle simple fullscreen on macos.
+    /// Toggle simple fullscreen on macOS.
     #[cfg(target_os = "macos")]
     ToggleSimpleFullscreen,
 
+    /// Clear active selection.
+    ClearSelection,
+
+    /// Toggle vi mode.
+    ToggleViMode,
+
     /// Allow receiving char input.
     ReceiveChar,
+
+    /// Start a forward buffer search.
+    SearchForward,
+
+    /// Start a backward buffer search.
+    SearchBackward,
 
     /// No action.
     None,
 }
 
-impl Default for Action {
-    fn default() -> Action {
-        Action::None
-    }
-}
-
 impl From<&'static str> for Action {
     fn from(s: &'static str) -> Action {
         Action::Esc(s.into())
+    }
+}
+
+/// Display trait used for error logging.
+impl Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::ViMotion(motion) => motion.fmt(f),
+            Action::ViAction(action) => action.fmt(f),
+            _ => write!(f, "{:?}", self),
+        }
+    }
+}
+
+/// Vi mode specific actions.
+#[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ViAction {
+    /// Toggle normal vi selection.
+    ToggleNormalSelection,
+    /// Toggle line vi selection.
+    ToggleLineSelection,
+    /// Toggle block vi selection.
+    ToggleBlockSelection,
+    /// Toggle semantic vi selection.
+    ToggleSemanticSelection,
+    /// Jump to the beginning of the next match.
+    SearchNext,
+    /// Jump to the beginning of the previous match.
+    SearchPrevious,
+    /// Jump to the next start of a match to the left of the origin.
+    SearchStart,
+    /// Jump to the next end of a match to the right of the origin.
+    SearchEnd,
+    /// Launch the URL below the vi mode cursor.
+    Open,
+}
+
+impl From<ViAction> for Action {
+    fn from(action: ViAction) -> Self {
+        Self::ViAction(action)
+    }
+}
+
+impl From<ViMotion> for Action {
+    fn from(motion: ViMotion) -> Self {
+        Self::ViMotion(motion)
     }
 }
 
@@ -241,16 +278,16 @@ macro_rules! bindings {
             let mut _mods = ModifiersState::empty();
             $(_mods = $mods;)*
             let mut _mode = TermMode::empty();
-            $(_mode = $mode;)*
+            $(_mode.insert($mode);)*
             let mut _notmode = TermMode::empty();
-            $(_notmode = $notmode;)*
+            $(_notmode.insert($notmode);)*
 
             v.push($ty {
                 trigger: $key,
                 mods: _mods,
                 mode: _mode,
                 notmode: _notmode,
-                action: $action,
+                action: $action.into(),
             });
         )*
 
@@ -261,65 +298,117 @@ macro_rules! bindings {
 pub fn default_mouse_bindings() -> Vec<MouseBinding> {
     bindings!(
         MouseBinding;
-        MouseButton::Middle; Action::PasteSelection;
+        MouseButton::Middle, ~TermMode::VI; Action::PasteSelection;
     )
 }
 
 pub fn default_key_bindings() -> Vec<KeyBinding> {
     let mut bindings = bindings!(
         KeyBinding;
-        Paste; Action::Paste;
         Copy;  Action::Copy;
+        Copy,  +TermMode::VI; Action::ClearSelection;
+        Paste, ~TermMode::VI; Action::Paste;
         L, ModifiersState::CTRL; Action::ClearLogNotice;
-        L, ModifiersState::CTRL; Action::Esc("\x0c".into());
-        PageUp,   ModifiersState::SHIFT, ~TermMode::ALT_SCREEN; Action::ScrollPageUp;
-        PageDown, ModifiersState::SHIFT, ~TermMode::ALT_SCREEN; Action::ScrollPageDown;
+        L,    ModifiersState::CTRL,  ~TermMode::VI; Action::Esc("\x0c".into());
+        Tab,  ModifiersState::SHIFT, ~TermMode::VI; Action::Esc("\x1b[Z".into());
+        Back, ModifiersState::ALT,   ~TermMode::VI; Action::Esc("\x1b\x7f".into());
+        Back, ModifiersState::SHIFT, ~TermMode::VI; Action::Esc("\x7f".into());
         Home,     ModifiersState::SHIFT, ~TermMode::ALT_SCREEN; Action::ScrollToTop;
         End,      ModifiersState::SHIFT, ~TermMode::ALT_SCREEN; Action::ScrollToBottom;
-        Home, +TermMode::APP_CURSOR; Action::Esc("\x1bOH".into());
-        Home, ~TermMode::APP_CURSOR; Action::Esc("\x1b[H".into());
-        Home, ModifiersState::SHIFT, +TermMode::ALT_SCREEN; Action::Esc("\x1b[1;2H".into());
-        End,  +TermMode::APP_CURSOR; Action::Esc("\x1bOF".into());
-        End,  ~TermMode::APP_CURSOR; Action::Esc("\x1b[F".into());
-        End,  ModifiersState::SHIFT, +TermMode::ALT_SCREEN; Action::Esc("\x1b[1;2F".into());
-        PageUp;   Action::Esc("\x1b[5~".into());
-        PageUp,   ModifiersState::SHIFT, +TermMode::ALT_SCREEN; Action::Esc("\x1b[5;2~".into());
-        PageDown; Action::Esc("\x1b[6~".into());
-        PageDown, ModifiersState::SHIFT, +TermMode::ALT_SCREEN; Action::Esc("\x1b[6;2~".into());
-        Tab,  ModifiersState::SHIFT; Action::Esc("\x1b[Z".into());
-        Back; Action::Esc("\x7f".into());
-        Back, ModifiersState::ALT; Action::Esc("\x1b\x7f".into());
-        Insert; Action::Esc("\x1b[2~".into());
-        Delete; Action::Esc("\x1b[3~".into());
-        Up,    +TermMode::APP_CURSOR; Action::Esc("\x1bOA".into());
-        Up,    ~TermMode::APP_CURSOR; Action::Esc("\x1b[A".into());
-        Down,  +TermMode::APP_CURSOR; Action::Esc("\x1bOB".into());
-        Down,  ~TermMode::APP_CURSOR; Action::Esc("\x1b[B".into());
-        Right, +TermMode::APP_CURSOR; Action::Esc("\x1bOC".into());
-        Right, ~TermMode::APP_CURSOR; Action::Esc("\x1b[C".into());
-        Left,  +TermMode::APP_CURSOR; Action::Esc("\x1bOD".into());
-        Left,  ~TermMode::APP_CURSOR; Action::Esc("\x1b[D".into());
-        F1;  Action::Esc("\x1bOP".into());
-        F2;  Action::Esc("\x1bOQ".into());
-        F3;  Action::Esc("\x1bOR".into());
-        F4;  Action::Esc("\x1bOS".into());
-        F5;  Action::Esc("\x1b[15~".into());
-        F6;  Action::Esc("\x1b[17~".into());
-        F7;  Action::Esc("\x1b[18~".into());
-        F8;  Action::Esc("\x1b[19~".into());
-        F9;  Action::Esc("\x1b[20~".into());
-        F10; Action::Esc("\x1b[21~".into());
-        F11; Action::Esc("\x1b[23~".into());
-        F12; Action::Esc("\x1b[24~".into());
-        F13; Action::Esc("\x1b[25~".into());
-        F14; Action::Esc("\x1b[26~".into());
-        F15; Action::Esc("\x1b[28~".into());
-        F16; Action::Esc("\x1b[29~".into());
-        F17; Action::Esc("\x1b[31~".into());
-        F18; Action::Esc("\x1b[32~".into());
-        F19; Action::Esc("\x1b[33~".into());
-        F20; Action::Esc("\x1b[34~".into());
-        NumpadEnter; Action::Esc("\n".into());
+        PageUp,   ModifiersState::SHIFT, ~TermMode::ALT_SCREEN; Action::ScrollPageUp;
+        PageDown, ModifiersState::SHIFT, ~TermMode::ALT_SCREEN; Action::ScrollPageDown;
+        Home,     ModifiersState::SHIFT, +TermMode::ALT_SCREEN, ~TermMode::VI;
+            Action::Esc("\x1b[1;2H".into());
+        End,      ModifiersState::SHIFT, +TermMode::ALT_SCREEN, ~TermMode::VI;
+            Action::Esc("\x1b[1;2F".into());
+        PageUp,   ModifiersState::SHIFT, +TermMode::ALT_SCREEN, ~TermMode::VI;
+            Action::Esc("\x1b[5;2~".into());
+        PageDown, ModifiersState::SHIFT, +TermMode::ALT_SCREEN, ~TermMode::VI;
+            Action::Esc("\x1b[6;2~".into());
+        Home,  +TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1bOH".into());
+        Home,  ~TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1b[H".into());
+        End,   +TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1bOF".into());
+        End,   ~TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1b[F".into());
+        Up,    +TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1bOA".into());
+        Up,    ~TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1b[A".into());
+        Down,  +TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1bOB".into());
+        Down,  ~TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1b[B".into());
+        Right, +TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1bOC".into());
+        Right, ~TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1b[C".into());
+        Left,  +TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1bOD".into());
+        Left,  ~TermMode::APP_CURSOR, ~TermMode::VI; Action::Esc("\x1b[D".into());
+        Back,        ~TermMode::VI; Action::Esc("\x7f".into());
+        Insert,      ~TermMode::VI; Action::Esc("\x1b[2~".into());
+        Delete,      ~TermMode::VI; Action::Esc("\x1b[3~".into());
+        PageUp,      ~TermMode::VI; Action::Esc("\x1b[5~".into());
+        PageDown,    ~TermMode::VI; Action::Esc("\x1b[6~".into());
+        F1,          ~TermMode::VI; Action::Esc("\x1bOP".into());
+        F2,          ~TermMode::VI; Action::Esc("\x1bOQ".into());
+        F3,          ~TermMode::VI; Action::Esc("\x1bOR".into());
+        F4,          ~TermMode::VI; Action::Esc("\x1bOS".into());
+        F5,          ~TermMode::VI; Action::Esc("\x1b[15~".into());
+        F6,          ~TermMode::VI; Action::Esc("\x1b[17~".into());
+        F7,          ~TermMode::VI; Action::Esc("\x1b[18~".into());
+        F8,          ~TermMode::VI; Action::Esc("\x1b[19~".into());
+        F9,          ~TermMode::VI; Action::Esc("\x1b[20~".into());
+        F10,         ~TermMode::VI; Action::Esc("\x1b[21~".into());
+        F11,         ~TermMode::VI; Action::Esc("\x1b[23~".into());
+        F12,         ~TermMode::VI; Action::Esc("\x1b[24~".into());
+        F13,         ~TermMode::VI; Action::Esc("\x1b[25~".into());
+        F14,         ~TermMode::VI; Action::Esc("\x1b[26~".into());
+        F15,         ~TermMode::VI; Action::Esc("\x1b[28~".into());
+        F16,         ~TermMode::VI; Action::Esc("\x1b[29~".into());
+        F17,         ~TermMode::VI; Action::Esc("\x1b[31~".into());
+        F18,         ~TermMode::VI; Action::Esc("\x1b[32~".into());
+        F19,         ~TermMode::VI; Action::Esc("\x1b[33~".into());
+        F20,         ~TermMode::VI; Action::Esc("\x1b[34~".into());
+        NumpadEnter, ~TermMode::VI; Action::Esc("\n".into());
+        Space, ModifiersState::SHIFT | ModifiersState::CTRL, +TermMode::VI; Action::ScrollToBottom;
+        Space, ModifiersState::SHIFT | ModifiersState::CTRL; Action::ToggleViMode;
+        Escape,                        +TermMode::VI; Action::ClearSelection;
+        I,                             +TermMode::VI; Action::ScrollToBottom;
+        I,                             +TermMode::VI; Action::ToggleViMode;
+        C,      ModifiersState::CTRL,  +TermMode::VI; Action::ToggleViMode;
+        Y,      ModifiersState::CTRL,  +TermMode::VI; Action::ScrollLineUp;
+        E,      ModifiersState::CTRL,  +TermMode::VI; Action::ScrollLineDown;
+        G,                             +TermMode::VI; Action::ScrollToTop;
+        G,      ModifiersState::SHIFT, +TermMode::VI; Action::ScrollToBottom;
+        B,      ModifiersState::CTRL,  +TermMode::VI; Action::ScrollPageUp;
+        F,      ModifiersState::CTRL,  +TermMode::VI; Action::ScrollPageDown;
+        U,      ModifiersState::CTRL,  +TermMode::VI; Action::ScrollHalfPageUp;
+        D,      ModifiersState::CTRL,  +TermMode::VI; Action::ScrollHalfPageDown;
+        Y,                             +TermMode::VI; Action::Copy;
+        Y,                             +TermMode::VI; Action::ClearSelection;
+        Slash,                         +TermMode::VI; Action::SearchForward;
+        Slash,  ModifiersState::SHIFT, +TermMode::VI; Action::SearchBackward;
+        V,                             +TermMode::VI; ViAction::ToggleNormalSelection;
+        V,      ModifiersState::SHIFT, +TermMode::VI; ViAction::ToggleLineSelection;
+        V,      ModifiersState::CTRL,  +TermMode::VI; ViAction::ToggleBlockSelection;
+        V,      ModifiersState::ALT,   +TermMode::VI; ViAction::ToggleSemanticSelection;
+        N,                             +TermMode::VI; ViAction::SearchNext;
+        N,      ModifiersState::SHIFT, +TermMode::VI; ViAction::SearchPrevious;
+        Return,                        +TermMode::VI; ViAction::Open;
+        K,                             +TermMode::VI; ViMotion::Up;
+        J,                             +TermMode::VI; ViMotion::Down;
+        H,                             +TermMode::VI; ViMotion::Left;
+        L,                             +TermMode::VI; ViMotion::Right;
+        Up,                            +TermMode::VI; ViMotion::Up;
+        Down,                          +TermMode::VI; ViMotion::Down;
+        Left,                          +TermMode::VI; ViMotion::Left;
+        Right,                         +TermMode::VI; ViMotion::Right;
+        Key0,                          +TermMode::VI; ViMotion::First;
+        Key4,   ModifiersState::SHIFT, +TermMode::VI; ViMotion::Last;
+        Key6,   ModifiersState::SHIFT, +TermMode::VI; ViMotion::FirstOccupied;
+        H,      ModifiersState::SHIFT, +TermMode::VI; ViMotion::High;
+        M,      ModifiersState::SHIFT, +TermMode::VI; ViMotion::Middle;
+        L,      ModifiersState::SHIFT, +TermMode::VI; ViMotion::Low;
+        B,                             +TermMode::VI; ViMotion::SemanticLeft;
+        W,                             +TermMode::VI; ViMotion::SemanticRight;
+        E,                             +TermMode::VI; ViMotion::SemanticRightEnd;
+        B,      ModifiersState::SHIFT, +TermMode::VI; ViMotion::WordLeft;
+        W,      ModifiersState::SHIFT, +TermMode::VI; ViMotion::WordRight;
+        E,      ModifiersState::SHIFT, +TermMode::VI; ViMotion::WordRightEnd;
+        Key5,   ModifiersState::SHIFT, +TermMode::VI; ViMotion::Bracket;
     );
 
     //   Code     Modifiers
@@ -348,43 +437,42 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         let modifiers_code = index + 2;
         bindings.extend(bindings!(
             KeyBinding;
-            Delete, mods; Action::Esc(format!("\x1b[3;{}~", modifiers_code));
-            Up,     mods; Action::Esc(format!("\x1b[1;{}A", modifiers_code));
-            Down,   mods; Action::Esc(format!("\x1b[1;{}B", modifiers_code));
-            Right,  mods; Action::Esc(format!("\x1b[1;{}C", modifiers_code));
-            Left,   mods; Action::Esc(format!("\x1b[1;{}D", modifiers_code));
-            F1,     mods; Action::Esc(format!("\x1b[1;{}P", modifiers_code));
-            F2,     mods; Action::Esc(format!("\x1b[1;{}Q", modifiers_code));
-            F3,     mods; Action::Esc(format!("\x1b[1;{}R", modifiers_code));
-            F4,     mods; Action::Esc(format!("\x1b[1;{}S", modifiers_code));
-            F5,     mods; Action::Esc(format!("\x1b[15;{}~", modifiers_code));
-            F6,     mods; Action::Esc(format!("\x1b[17;{}~", modifiers_code));
-            F7,     mods; Action::Esc(format!("\x1b[18;{}~", modifiers_code));
-            F8,     mods; Action::Esc(format!("\x1b[19;{}~", modifiers_code));
-            F9,     mods; Action::Esc(format!("\x1b[20;{}~", modifiers_code));
-            F10,    mods; Action::Esc(format!("\x1b[21;{}~", modifiers_code));
-            F11,    mods; Action::Esc(format!("\x1b[23;{}~", modifiers_code));
-            F12,    mods; Action::Esc(format!("\x1b[24;{}~", modifiers_code));
-            F13,    mods; Action::Esc(format!("\x1b[25;{}~", modifiers_code));
-            F14,    mods; Action::Esc(format!("\x1b[26;{}~", modifiers_code));
-            F15,    mods; Action::Esc(format!("\x1b[28;{}~", modifiers_code));
-            F16,    mods; Action::Esc(format!("\x1b[29;{}~", modifiers_code));
-            F17,    mods; Action::Esc(format!("\x1b[31;{}~", modifiers_code));
-            F18,    mods; Action::Esc(format!("\x1b[32;{}~", modifiers_code));
-            F19,    mods; Action::Esc(format!("\x1b[33;{}~", modifiers_code));
-            F20,    mods; Action::Esc(format!("\x1b[34;{}~", modifiers_code));
+            Delete, mods, ~TermMode::VI; Action::Esc(format!("\x1b[3;{}~", modifiers_code));
+            Up,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}A", modifiers_code));
+            Down,   mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}B", modifiers_code));
+            Right,  mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}C", modifiers_code));
+            Left,   mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}D", modifiers_code));
+            F1,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}P", modifiers_code));
+            F2,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}Q", modifiers_code));
+            F3,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}R", modifiers_code));
+            F4,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}S", modifiers_code));
+            F5,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[15;{}~", modifiers_code));
+            F6,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[17;{}~", modifiers_code));
+            F7,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[18;{}~", modifiers_code));
+            F8,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[19;{}~", modifiers_code));
+            F9,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[20;{}~", modifiers_code));
+            F10,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[21;{}~", modifiers_code));
+            F11,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[23;{}~", modifiers_code));
+            F12,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[24;{}~", modifiers_code));
+            F13,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[25;{}~", modifiers_code));
+            F14,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[26;{}~", modifiers_code));
+            F15,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[28;{}~", modifiers_code));
+            F16,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[29;{}~", modifiers_code));
+            F17,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[31;{}~", modifiers_code));
+            F18,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[32;{}~", modifiers_code));
+            F19,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[33;{}~", modifiers_code));
+            F20,    mods, ~TermMode::VI; Action::Esc(format!("\x1b[34;{}~", modifiers_code));
         ));
 
-        // We're adding the following bindings with `Shift` manually above, so skipping them here
-        // modifiers_code != Shift
+        // We're adding the following bindings with `Shift` manually above, so skipping them here.
         if modifiers_code != 2 {
             bindings.extend(bindings!(
                 KeyBinding;
-                Insert,   mods; Action::Esc(format!("\x1b[2;{}~", modifiers_code));
-                PageUp,   mods; Action::Esc(format!("\x1b[5;{}~", modifiers_code));
-                PageDown, mods; Action::Esc(format!("\x1b[6;{}~", modifiers_code));
-                End,      mods; Action::Esc(format!("\x1b[1;{}F", modifiers_code));
-                Home,     mods; Action::Esc(format!("\x1b[1;{}H", modifiers_code));
+                Insert,   mods, ~TermMode::VI; Action::Esc(format!("\x1b[2;{}~", modifiers_code));
+                PageUp,   mods, ~TermMode::VI; Action::Esc(format!("\x1b[5;{}~", modifiers_code));
+                PageDown, mods, ~TermMode::VI; Action::Esc(format!("\x1b[6;{}~", modifiers_code));
+                End,      mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}F", modifiers_code));
+                Home,     mods, ~TermMode::VI; Action::Esc(format!("\x1b[1;{}H", modifiers_code));
             ));
         }
     }
@@ -398,14 +486,18 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
 fn common_keybindings() -> Vec<KeyBinding> {
     bindings!(
         KeyBinding;
-        V,        ModifiersState::CTRL | ModifiersState::SHIFT; Action::Paste;
+        V,        ModifiersState::CTRL | ModifiersState::SHIFT, ~TermMode::VI; Action::Paste;
         C,        ModifiersState::CTRL | ModifiersState::SHIFT; Action::Copy;
-        Insert,   ModifiersState::SHIFT; Action::PasteSelection;
+        F,        ModifiersState::CTRL | ModifiersState::SHIFT; Action::SearchForward;
+        B,        ModifiersState::CTRL | ModifiersState::SHIFT; Action::SearchBackward;
+        C,        ModifiersState::CTRL | ModifiersState::SHIFT, +TermMode::VI; Action::ClearSelection;
+        Insert,   ModifiersState::SHIFT, ~TermMode::VI; Action::PasteSelection;
         Key0,     ModifiersState::CTRL;  Action::ResetFontSize;
         Equals,   ModifiersState::CTRL;  Action::IncreaseFontSize;
-        Add,      ModifiersState::CTRL;  Action::IncreaseFontSize;
-        Subtract, ModifiersState::CTRL;  Action::DecreaseFontSize;
-        Minus,    ModifiersState::CTRL;  Action::DecreaseFontSize;
+        Plus,     ModifiersState::CTRL;  Action::IncreaseFontSize;
+        NumpadAdd,      ModifiersState::CTRL;  Action::IncreaseFontSize;
+        Minus,          ModifiersState::CTRL;  Action::DecreaseFontSize;
+        NumpadSubtract, ModifiersState::CTRL;  Action::DecreaseFontSize;
     )
 }
 
@@ -428,24 +520,30 @@ pub fn platform_key_bindings() -> Vec<KeyBinding> {
 pub fn platform_key_bindings() -> Vec<KeyBinding> {
     bindings!(
         KeyBinding;
-        Key0,   ModifiersState::LOGO;  Action::ResetFontSize;
-        Equals, ModifiersState::LOGO;  Action::IncreaseFontSize;
-        Add,    ModifiersState::LOGO;  Action::IncreaseFontSize;
-        Minus,  ModifiersState::LOGO;  Action::DecreaseFontSize;
-        Insert, ModifiersState::SHIFT; Action::Esc("\x1b[2;2~".into());
+        Key0,   ModifiersState::LOGO; Action::ResetFontSize;
+        Equals, ModifiersState::LOGO; Action::IncreaseFontSize;
+        Plus,   ModifiersState::LOGO; Action::IncreaseFontSize;
+        NumpadAdd,      ModifiersState::LOGO;  Action::IncreaseFontSize;
+        Minus,          ModifiersState::LOGO;  Action::DecreaseFontSize;
+        NumpadSubtract, ModifiersState::LOGO;  Action::DecreaseFontSize;
+        Insert, ModifiersState::SHIFT, ~TermMode::VI; Action::Esc("\x1b[2;2~".into());
+        K, ModifiersState::LOGO, ~TermMode::VI; Action::Esc("\x0c".into());
+        V, ModifiersState::LOGO, ~TermMode::VI; Action::Paste;
+        N, ModifiersState::LOGO; Action::SpawnNewInstance;
         F, ModifiersState::CTRL | ModifiersState::LOGO; Action::ToggleFullscreen;
         K, ModifiersState::LOGO; Action::ClearHistory;
-        K, ModifiersState::LOGO; Action::Esc("\x0c".into());
-        V, ModifiersState::LOGO; Action::Paste;
         C, ModifiersState::LOGO; Action::Copy;
+        C, ModifiersState::LOGO, +TermMode::VI; Action::ClearSelection;
         H, ModifiersState::LOGO; Action::Hide;
         M, ModifiersState::LOGO; Action::Minimize;
         Q, ModifiersState::LOGO; Action::Quit;
         W, ModifiersState::LOGO; Action::Quit;
+        F, ModifiersState::LOGO; Action::SearchForward;
+        B, ModifiersState::LOGO; Action::SearchBackward;
     )
 }
 
-// Don't return any bindings for tests since they are commented-out by default
+// Don't return any bindings for tests since they are commented-out by default.
 #[cfg(test)]
 pub fn platform_key_bindings() -> Vec<KeyBinding> {
     vec![]
@@ -462,7 +560,7 @@ impl<'a> Deserialize<'a> for Key {
     where
         D: Deserializer<'a>,
     {
-        let value = serde_yaml::Value::deserialize(deserializer)?;
+        let value = SerdeValue::deserialize(deserializer)?;
         match u32::deserialize(value.clone()) {
             Ok(scancode) => Ok(Key::Scancode(scancode)),
             Err(_) => {
@@ -490,7 +588,7 @@ impl<'a> Deserialize<'a> for ModeWrapper {
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(
-                    "Combination of AppCursor | AppKeypad | Alt, possibly with negation (~)",
+                    "a combination of AppCursor | AppKeypad | Alt | Vi, possibly with negation (~)",
                 )
             }
 
@@ -508,7 +606,9 @@ impl<'a> Deserialize<'a> for ModeWrapper {
                         "~appkeypad" => res.not_mode |= TermMode::APP_KEYPAD,
                         "alt" => res.mode |= TermMode::ALT_SCREEN,
                         "~alt" => res.not_mode |= TermMode::ALT_SCREEN,
-                        _ => error!(target: LOG_TARGET_CONFIG, "Unknown mode {:?}", modifier),
+                        "vi" => res.mode |= TermMode::VI,
+                        "~vi" => res.not_mode |= TermMode::VI,
+                        _ => return Err(E::invalid_value(Unexpected::Str(modifier), &self)),
                     }
                 }
 
@@ -538,7 +638,17 @@ impl<'a> Deserialize<'a> for MouseButtonWrapper {
             type Value = MouseButtonWrapper;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("Left, Right, Middle, or a number")
+                f.write_str("Left, Right, Middle, or a number from 0 to 255")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<MouseButtonWrapper, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    0..=255 => Ok(MouseButtonWrapper(MouseButton::Other(value as u8))),
+                    _ => Err(E::invalid_value(Unexpected::Unsigned(value), &self)),
+                }
             }
 
             fn visit_str<E>(self, value: &str) -> Result<MouseButtonWrapper, E>
@@ -549,18 +659,12 @@ impl<'a> Deserialize<'a> for MouseButtonWrapper {
                     "Left" => Ok(MouseButtonWrapper(MouseButton::Left)),
                     "Right" => Ok(MouseButtonWrapper(MouseButton::Right)),
                     "Middle" => Ok(MouseButtonWrapper(MouseButton::Middle)),
-                    _ => {
-                        if let Ok(index) = u8::from_str(value) {
-                            Ok(MouseButtonWrapper(MouseButton::Other(index)))
-                        } else {
-                            Err(E::invalid_value(Unexpected::Str(value), &self))
-                        }
-                    },
+                    _ => Err(E::invalid_value(Unexpected::Str(value), &self)),
                 }
             }
         }
 
-        deserializer.deserialize_str(MouseButtonVisitor)
+        deserializer.deserialize_any(MouseButtonVisitor)
     }
 }
 
@@ -611,6 +715,8 @@ impl<'a> Deserialize<'a> for RawBinding {
     where
         D: Deserializer<'a>,
     {
+        const FIELDS: &[&str] = &["key", "mods", "mode", "action", "chars", "mouse", "command"];
+
         enum Field {
             Key,
             Mods,
@@ -627,9 +733,6 @@ impl<'a> Deserialize<'a> for RawBinding {
                 D: Deserializer<'a>,
             {
                 struct FieldVisitor;
-
-                static FIELDS: &[&str] =
-                    &["key", "mods", "mode", "action", "chars", "mouse", "command"];
 
                 impl<'a> Visitor<'a> for FieldVisitor {
                     type Value = Field;
@@ -678,9 +781,9 @@ impl<'a> Deserialize<'a> for RawBinding {
                 let mut mode: Option<TermMode> = None;
                 let mut not_mode: Option<TermMode> = None;
                 let mut mouse: Option<MouseButton> = None;
-                let mut command: Option<CommandWrapper> = None;
+                let mut command: Option<Program> = None;
 
-                use ::serde::de::Error;
+                use de::Error;
 
                 while let Some(struct_key) = map.next_key::<Field>()? {
                     match struct_key {
@@ -689,10 +792,10 @@ impl<'a> Deserialize<'a> for RawBinding {
                                 return Err(<V::Error as Error>::duplicate_field("key"));
                             }
 
-                            let val = map.next_value::<serde_yaml::Value>()?;
+                            let val = map.next_value::<SerdeValue>()?;
                             if val.is_u64() {
                                 let scancode = val.as_u64().unwrap();
-                                if scancode > u64::from(::std::u32::MAX) {
+                                if scancode > u64::from(std::u32::MAX) {
                                     return Err(<V::Error as Error>::custom(format!(
                                         "Invalid key binding, scancode too big: {}",
                                         scancode
@@ -725,7 +828,36 @@ impl<'a> Deserialize<'a> for RawBinding {
                                 return Err(<V::Error as Error>::duplicate_field("action"));
                             }
 
-                            action = Some(map.next_value::<Action>()?);
+                            let value = map.next_value::<SerdeValue>()?;
+
+                            action = if let Ok(vi_action) = ViAction::deserialize(value.clone()) {
+                                Some(vi_action.into())
+                            } else if let Ok(vi_motion) = ViMotion::deserialize(value.clone()) {
+                                Some(vi_motion.into())
+                            } else {
+                                match Action::deserialize(value.clone()).map_err(V::Error::custom) {
+                                    Ok(action) => Some(action),
+                                    Err(err) => {
+                                        let value = match value {
+                                            SerdeValue::String(string) => string,
+                                            SerdeValue::Mapping(map) if map.len() == 1 => {
+                                                match map.into_iter().next() {
+                                                    Some((
+                                                        SerdeValue::String(string),
+                                                        SerdeValue::Null,
+                                                    )) => string,
+                                                    _ => return Err(err),
+                                                }
+                                            },
+                                            _ => return Err(err),
+                                        };
+                                        return Err(V::Error::custom(format!(
+                                            "unknown keyboard action `{}`",
+                                            value
+                                        )));
+                                    },
+                                }
+                            };
                         },
                         Field::Chars => {
                             if chars.is_some() {
@@ -746,31 +878,35 @@ impl<'a> Deserialize<'a> for RawBinding {
                                 return Err(<V::Error as Error>::duplicate_field("command"));
                             }
 
-                            command = Some(map.next_value::<CommandWrapper>()?);
+                            command = Some(map.next_value::<Program>()?);
                         },
                     }
                 }
 
-                let action = match (action, chars, command) {
-                    (Some(action), None, None) => action,
-                    (None, Some(chars), None) => Action::Esc(chars),
-                    (None, None, Some(cmd)) => match cmd {
-                        CommandWrapper::Just(program) => Action::Command(program, vec![]),
-                        CommandWrapper::WithArgs { program, args } => {
-                            Action::Command(program, args)
-                        },
-                    },
-                    (None, None, None) => {
-                        return Err(V::Error::custom("must specify chars, action or command"));
-                    },
-                    _ => {
-                        return Err(V::Error::custom("must specify only chars, action or command"))
-                    },
-                };
-
                 let mode = mode.unwrap_or_else(TermMode::empty);
                 let not_mode = not_mode.unwrap_or_else(TermMode::empty);
                 let mods = mods.unwrap_or_else(ModifiersState::default);
+
+                let action = match (action, chars, command) {
+                    (Some(action @ Action::ViMotion(_)), None, None)
+                    | (Some(action @ Action::ViAction(_)), None, None) => {
+                        if !mode.intersects(TermMode::VI) || not_mode.intersects(TermMode::VI) {
+                            return Err(V::Error::custom(format!(
+                                "action `{}` is only available in vi mode, try adding `mode: Vi`",
+                                action,
+                            )));
+                        }
+                        action
+                    },
+                    (Some(action), None, None) => action,
+                    (None, Some(chars), None) => Action::Esc(chars),
+                    (None, None, Some(cmd)) => Action::Command(cmd),
+                    _ => {
+                        return Err(V::Error::custom(
+                            "must specify exactly one of chars, action or command",
+                        ))
+                    },
+                };
 
                 if mouse.is_none() && key.is_none() {
                     return Err(V::Error::custom("bindings require mouse button or key"));
@@ -779,8 +915,6 @@ impl<'a> Deserialize<'a> for RawBinding {
                 Ok(RawBinding { mode, notmode: not_mode, action, key, mouse, mods })
             }
         }
-
-        const FIELDS: &[&str] = &["key", "mods", "mode", "action", "chars", "mouse", "command"];
 
         deserializer.deserialize_struct("RawBinding", FIELDS, RawBindingVisitor)
     }
@@ -792,7 +926,8 @@ impl<'a> Deserialize<'a> for MouseBinding {
         D: Deserializer<'a>,
     {
         let raw = RawBinding::deserialize(deserializer)?;
-        raw.into_mouse_binding().map_err(|_| D::Error::custom("expected mouse binding"))
+        raw.into_mouse_binding()
+            .map_err(|_| D::Error::custom("expected mouse binding, got key binding"))
     }
 }
 
@@ -802,38 +937,12 @@ impl<'a> Deserialize<'a> for KeyBinding {
         D: Deserializer<'a>,
     {
         let raw = RawBinding::deserialize(deserializer)?;
-        raw.into_key_binding().map_err(|_| D::Error::custom("expected key binding"))
+        raw.into_key_binding()
+            .map_err(|_| D::Error::custom("expected key binding, got mouse binding"))
     }
 }
 
-#[serde(untagged)]
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-pub enum CommandWrapper {
-    Just(String),
-    WithArgs {
-        program: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
-}
-
-impl CommandWrapper {
-    pub fn program(&self) -> &str {
-        match self {
-            CommandWrapper::Just(program) => program,
-            CommandWrapper::WithArgs { program, .. } => program,
-        }
-    }
-
-    pub fn args(&self) -> &[String] {
-        match self {
-            CommandWrapper::Just(_) => &[],
-            CommandWrapper::WithArgs { args, .. } => args,
-        }
-    }
-}
-
-/// Newtype for implementing deserialize on glutin Mods
+/// Newtype for implementing deserialize on glutin Mods.
 ///
 /// Our deserialize impl wouldn't be covered by a derive(Deserialize); see the
 /// impl below.
@@ -857,7 +966,7 @@ impl<'a> de::Deserialize<'a> for ModsWrapper {
             type Value = ModsWrapper;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("Some subset of Command|Shift|Super|Alt|Option|Control")
+                f.write_str("a subset of Shift|Control|Super|Command|Alt|Option")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<ModsWrapper, E>
@@ -872,7 +981,7 @@ impl<'a> de::Deserialize<'a> for ModsWrapper {
                         "alt" | "option" => res.insert(ModifiersState::ALT),
                         "control" => res.insert(ModifiersState::CTRL),
                         "none" => (),
-                        _ => error!(target: LOG_TARGET_CONFIG, "Unknown modifier {:?}", modifier),
+                        _ => return Err(E::invalid_value(Unexpected::Str(modifier), &self)),
                     }
                 }
 
@@ -885,7 +994,7 @@ impl<'a> de::Deserialize<'a> for ModsWrapper {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use glutin::event::ModifiersState;
 
     use alacritty_terminal::term::TermMode;
@@ -898,7 +1007,7 @@ mod test {
         fn default() -> Self {
             Self {
                 mods: Default::default(),
-                action: Default::default(),
+                action: Action::None,
                 mode: TermMode::empty(),
                 notmode: TermMode::empty(),
                 trigger: Default::default(),
@@ -944,6 +1053,7 @@ mod test {
         b2.mode = TermMode::ALT_SCREEN;
 
         assert!(b1.triggers_match(&b2));
+        assert!(b2.triggers_match(&b1));
     }
 
     #[test]
@@ -964,26 +1074,18 @@ mod test {
         let b2 = MockBinding::default();
 
         assert!(b1.triggers_match(&b2));
+        assert!(b2.triggers_match(&b1));
     }
 
     #[test]
-    fn binding_matches_superset_mode() {
-        let mut b1 = MockBinding::default();
-        b1.mode = TermMode::APP_KEYPAD;
-        let mut b2 = MockBinding::default();
-        b2.mode = TermMode::ALT_SCREEN | TermMode::APP_KEYPAD;
-
-        assert!(b1.triggers_match(&b2));
-    }
-
-    #[test]
-    fn binding_matches_subset_mode() {
+    fn binding_matches_modes() {
         let mut b1 = MockBinding::default();
         b1.mode = TermMode::ALT_SCREEN | TermMode::APP_KEYPAD;
         let mut b2 = MockBinding::default();
         b2.mode = TermMode::APP_KEYPAD;
 
         assert!(b1.triggers_match(&b2));
+        assert!(b2.triggers_match(&b1));
     }
 
     #[test]
@@ -994,6 +1096,7 @@ mod test {
         b2.mode = TermMode::APP_KEYPAD | TermMode::APP_CURSOR;
 
         assert!(b1.triggers_match(&b2));
+        assert!(b2.triggers_match(&b1));
     }
 
     #[test]
@@ -1004,6 +1107,7 @@ mod test {
         b2.notmode = TermMode::ALT_SCREEN;
 
         assert!(!b1.triggers_match(&b2));
+        assert!(!b2.triggers_match(&b1));
     }
 
     #[test]
@@ -1014,6 +1118,30 @@ mod test {
         b2.mode = TermMode::APP_KEYPAD;
 
         assert!(!b1.triggers_match(&b2));
+        assert!(!b2.triggers_match(&b1));
+    }
+
+    #[test]
+    fn binding_matches_notmodes() {
+        let mut subset_notmodes = MockBinding::default();
+        let mut superset_notmodes = MockBinding::default();
+        subset_notmodes.notmode = TermMode::VI | TermMode::APP_CURSOR;
+        superset_notmodes.notmode = TermMode::APP_CURSOR;
+
+        assert!(subset_notmodes.triggers_match(&superset_notmodes));
+        assert!(superset_notmodes.triggers_match(&subset_notmodes));
+    }
+
+    #[test]
+    fn binding_matches_mode_notmode() {
+        let mut b1 = MockBinding::default();
+        let mut b2 = MockBinding::default();
+        b1.mode = TermMode::VI;
+        b1.notmode = TermMode::APP_CURSOR;
+        b2.notmode = TermMode::APP_CURSOR;
+
+        assert!(b1.triggers_match(&b2));
+        assert!(b2.triggers_match(&b1));
     }
 
     #[test]

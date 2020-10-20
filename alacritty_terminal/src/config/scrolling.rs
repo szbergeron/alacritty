@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::config::{failure_default, LOG_TARGET_CONFIG, MAX_SCROLLBACK_LINES};
 
-/// Struct for scrolling related settings
+/// Struct for scrolling related settings.
 #[serde(default)]
 #[derive(Deserialize, Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct Scrolling {
@@ -11,8 +11,10 @@ pub struct Scrolling {
     history: ScrollingHistory,
     #[serde(deserialize_with = "failure_default")]
     multiplier: ScrollingMultiplier,
+
+    // TODO: REMOVED
     #[serde(deserialize_with = "failure_default")]
-    pub auto_scroll: bool,
+    pub auto_scroll: Option<bool>,
 
     // TODO: DEPRECATED
     #[serde(deserialize_with = "failure_default")]
@@ -32,7 +34,7 @@ impl Scrolling {
         self.faux_multiplier.map(|sm| sm.0)
     }
 
-    // Update the history size, used in ref tests
+    // Update the history size, used in ref tests.
     pub fn set_history(&mut self, history: u32) {
         self.history = ScrollingHistory(history);
     }
@@ -43,7 +45,7 @@ struct ScrollingMultiplier(u8);
 
 impl Default for ScrollingMultiplier {
     fn default() -> Self {
-        ScrollingMultiplier(3)
+        Self(3)
     }
 }
 
@@ -52,7 +54,7 @@ struct ScrollingHistory(u32);
 
 impl Default for ScrollingHistory {
     fn default() -> Self {
-        ScrollingHistory(10_000)
+        Self(10_000)
     }
 }
 

@@ -1,10 +1,173 @@
 # Changelog
-All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to Alacritty are documented in this file.
+The sections should follow the order `Packaging`, `Added`, `Changed`, `Fixed` and `Removed`.
 
-## 0.4.2-dev
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+## 0.6.0-dev
+
+### Packaging
+
+- Minimum Rust version has been bumped to 1.43.0
+- The snapcraft.yaml file has been removed
+- Updated `setab`/`setaf` capabilities in `alacritty-direct` to use colons
+- WinPTY is now enabled only when targeting MSVC
+
+### Added
+
+- Secondary device attributes escape (`CSI > 0 c`)
+- Support for colon separated SGR 38/48
+- New Ctrl+C binding to cancel search and leave vi mode
+- Escapes for double underlines (`CSI 4 : 2 m`) and underline reset (`CSI 4 : 0 m`)
+- Configuration file option for sourcing other files (`import`)
+- CLI parameter `--option`/`-o` to override any configuration field
+- Escape sequences to report text area size in pixels (`CSI 14 t`) and in characters (`CSI 18 t`)
+- Support for single line terminals dimensions
+- Right clicking on Wayland's client side decorations will show application menu
+- Escape sequences to enable and disable window urgency hints (`CSI ? 1042 h`, `CSI ? 1042 l`)
+
+### Changed
+
+- Cursors are now inverted when their fixed color is similar to the cell's background
+- Use working directory of active process instead of shell for SpawnNewInstance action
+- Fallback to normal underline for unsupported underline types in `CSI 4 : ? m` escapes
+- The user's background color is now used as the foreground for the render timer
+- Use yellow/red from the config for error and warning messages instead of fixed colors
+- Existing CLI parameters are now passed to instances spawned using `SpawnNewInstance`
+- Wayland's Client side decorations now use the search bar colors
+
+### Fixed
+
+- Incorrect window location with negative `window.position` config options
+- Slow rendering performance with HiDPI displays, especially on macOS
+- Keys swallowed during search when pressing them right before releasing backspace
+- Crash when a wrapped line is rotated into the last line
+- Selection wrapping to the top when selecting below the error/warning bar
+- Pasting into clients only supporting `UTF8_STRING` mime type on Wayland
+- Crash when copying/pasting with neither pointer nor keyboard focus on Wayland
+- Crash due to fd leak on Wayland
+- IME window position with fullwidth characters in the search bar
+- Selection expanding over 2 characters when scrolled in history with fullwidth characters in use
+- Selection scrolling not starting when mouse is over the message bar
+- Incorrect text width calculation in message bar when the message contains multibyte characters
+- Remapped caps lock to escape not triggering escape bindings on Wayland
+- Crash when setting overly long title on Wayland
+- Switching in and out of various window states, like Fullscreen, not persisting window size on Wayland
+- Crash when providing 0 for `XCURSOR_SIZE` on Wayland
+- Gap between window and server side decorations on KWIN Wayland
+- Wayland's client side decorations not working after tty switch
+- `Fullscreen` startup mode not working on Wayland
+- Window not being rescaled when changing DPR of the current monitor on Wayland
+- Crash in some cases when pointer isn't presented upon startup on Wayland
+- IME not working on Wayland
+- Crash on startup on GNOME since its 3.37.90 version on Wayland
+- Touchpad scrolling scrolled less than it should on macOS/Wayland on scaled outputs
+- Incorrect modifiers at startup on X11
+- `Add` and `Subtract` keys are now named `NumpadAdd` and `NumpadSubtract` respectively
+- Feature checking when cross compiling between different operating systems
+- Crash when writing to the clipboard fails on Wayland
+
+## 0.5.0
+
+### Packaging
+
+- Minimum Rust version has been bumped to 1.41.0
+- Prebuilt Linux binaries have been removed
+- Added manpage, terminfo, and completions to macOS application bundle
+- On Linux/BSD the build will fail without Fontconfig installed, instead of building it from source
+- Minimum FreeType version has been bumped to 2.8 on Linux/BSD
+
+### Added
+
+- Default Command+N keybinding for SpawnNewInstance on macOS
+- Vi mode for regex search, copying text, and opening links
+- `CopySelection` action which copies into selection buffer on Linux/BSD
+- Option `cursor.thickness` to set terminal cursor thickness
+- Font fallback on Windows
+- Support for Fontconfig embolden and matrix options
+- Opt-out compilation flag `winpty` to disable WinPTY support
+- Scrolling during selection when mouse is at top/bottom of window
+- Expanding existing selections using single, double and triple click with the right mouse button
+- Support for `gopher` and `gemini` URLs
+- Unicode 13 support
+- Option to run command on bell which can be set in `bell.command`
+- Fallback to program specified in `$SHELL` variable on Linux/BSD if it is present
+
+### Changed
+
+- Block cursor is no longer inverted at the start/end of a selection
+- Preserve selection on non-LMB or mouse mode clicks
+- Wayland client side decorations are now based on config colorscheme
+- Low resolution window decoration icon on Windows
+- Mouse bindings for additional buttons need to be specified as a number not a string
+- Don't hide cursor on modifier press with `mouse.hide_when_typing` enabled
+- `Shift + Backspace` now sends `^?` instead of `^H`
+- Default color scheme is now `Tomorrow Night` with the bright colors of `Tomorrow Night Bright`
+- Set IUTF8 termios flag for improved UTF8 input support
+- Dragging files into terminal now adds a space after each path
+- Default binding replacement conditions
+- Adjusted selection clearing granularity to more accurately match content
+- To use the cell's text color for selection with a modified background, the `color.selection.text`
+    variable must now be set to `CellForeground` instead of omitting it
+- URLs are no longer highlighted without a clearly delimited scheme
+- Renamed config option `visual_bell` to `bell`
+- Moved config option `dynamic_title` to `window.dynamic_title`
+
+### Fixed
+
+- Selection not cleared when switching between main and alt grid
+- Freeze when application is invisible on Wayland
+- Paste from some apps on Wayland
+- Slow startup with Nvidia binary drivers on some X11 systems
+- Display not scrolling when printing new lines while scrolled in history
+- Regression in font rendering on macOS
+- Scroll down escape (`CSI Ps T`) incorrectly pulling lines from history
+- Dim escape (`CSI 2 m`) support for truecolor text
+- Incorrectly deleted lines when increasing width with a prompt wrapped using spaces
+- Documentation for class in `--help` missing information on setting general class
+- Linewrap tracking when switching between primary and alternate screen buffer
+- Preservation of the alternate screen's saved cursor when swapping to primary screen and back
+- Reflow of cursor during resize
+- Cursor color escape ignored when its color is set to inverted in the config
+- Fontconfig's `autohint` and `hinting` options being ignored
+- Ingoring of default FreeType properties
+- Alacritty crashing at startup when the configured font does not exist
+- Font size rounding error
+
+### Removed
+
+- Environment variable `RUST_LOG` for selecting the log level
+- Deprecated `window.start_maximized` config field
+- Deprecated `render_timer` config field
+- Deprecated `persistent_logging` config field
+
+## 0.4.3
+
+### Fixed
+
+- Tabstops not being reset with `reset`
+- Fallback to `LC_CTYPE=UTF-8` on macOS without valid system locale
+- Resize lag on launch under some X11 wms
+- Increased input latency due to vsync behavior on X11
+- Emoji colors blending with terminal background
+- Fix escapes prematurely terminated by terminators in unicode glyphs
+- Incorrect location when clicking inside an unfocused window on macOS
+- Startup mode `Maximized` on Windows
+- Crash when writing a fullwidth character in the last column with auto-wrap mode disabled
+- Crashing at startup on Windows
+
+## 0.4.2
+
+### Packaging
+
+- Minimum Rust version has been bumped to 1.37.0
+- Added Rust features `x11` and `wayland` to pick backends, with both enabled by default
+- Capitalized the Alacritty.desktop file
+
+### Added
+
+- Live config reload for `window.title`
 
 ### Changed
 
@@ -12,6 +175,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Renamed `WINIT_HIDPI_FACTOR` environment variable to `WINIT_X11_SCALE_FACTOR`
 - Print an error instead of crashing, when startup working directory is invalid
 - Line selection will now expand across wrapped lines
+- The default value for `draw_bold_text_with_bright_colors` is now `false`
+- Mirror OSC query terminators instead of always using BEL
+- Increased Beam, Underline, and Hollow Block cursors' line widths
+- Dynamic title is not disabled anymore when `window.title` is set in config
 
 ### Fixed
 
@@ -23,6 +190,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Limited payload length in clipboard escape (used for Tmux copy/paste)
 - Alacritty not ignoring keyboard events for changing WM focus on X11
 - Regression which added a UNC path prefix to the working directory on Windows
+- CLI parameters discarded when config is reload
+- Blurred icons in KDE task switcher (alacritty.ico is now high-res)
+- Consecutive builds failing on macOS due to preexisting `/Application` symlink
+- Block selection starting from first column after beginning leaves the scrollback
+- Incorrect selection status of the first cell when selection is off screen
+- Backwards bracket selection
+- Stack overflow when printing shader creation error
+- Underline position for bitmap fonts
+- Selection rotating outside of scrolling region
+- Throughput performance problems caused by excessive font metric queries
+- Unicode throughput performance on Linux/BSD
+- Resize of bitmap fonts
+- Crash when using bitmap font with `embeddedbitmap` set to `false`
+- Inconsistent fontconfig fallback
+- Handling of OpenType variable fonts
+- Expansion of block-selection on partially selected full-width glyphs
+- Minimize action only works with decorations on macOS
+- Window permanently vanishing after hiding on macOS
+- Handling of URLs with single quotes
+- Parser reset between DCS escapes
+- Parser stopping at unknown DEC private modes/SGR character attributes
+- Block selection appending duplicate newlines when last column is selected
+- Bitmap fonts being a bit smaller than they should be in some cases
+- Config reload creating alternate screen history instead of updating scrollback
+- Crash on Wayland compositors supporting `wl_seat` version 7+
+- Message bar not hiding after fixing wrong color value in config
+- Tabstops cleared on resize
+- Tabstops not breaking across lines
+- Crash when parsing DCS escape with more than 16 parameters
+- Ignoring of slow touchpad scrolling
+- Selection invisible when starting above viewport and ending below it
+- Clipboard not working after TTY switch on Wayland
+- Crash when pasting non UTF-8 string advertised as UTF-8 string on Wayland
+- Incorrect modifiers tracking on X11 and macOS, leading to 'sticky' modifiers
+- Crash when starting on Windows with missing dark mode support
+- Variables `XCURSOR_THEME` and `XCURSOR_SIZE` ignored on Wayland
+- Low resolution mouse cursor and decorations on HiDPI Wayland outputs
+- Decorations visible when in fullscreen on Wayland
+- Window size not persisted correctly after fullscreening on macOS
+- Crash on startup with some locales on X11
+- Shrinking terminal height in alt screen deleting primary screen content
+
+### Removed
+
+- Config option `auto_scroll`, which is now always disabled
+- Config option `tabspaces`, which is now fixed at `8`
 
 ## 0.4.1
 
@@ -358,10 +571,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - All options in the configuration file are now optional
 
-### Removed
-
-- Windows and macOS configuration files (`alacritty.yml` is now platform independent)
-
 ### Fixed
 
 - Replaced `Command` with `Super` in the Linux and Windows config documentation
@@ -370,6 +579,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve issue with high CPU usage after moving Alacritty between displays
 - Characters will no longer be deleted when using ncurses with the hard tab optimization
 - Crash on non-linux operating systems when using the `SpawnNewInstance` action
+
+### Removed
+
+- Windows and macOS configuration files (`alacritty.yml` is now platform independent)
 
 ## Version 0.2.5
 
@@ -458,13 +671,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extra padding is now spread evenly around the terminal grid
 - DEB file installs to `usr/bin` instead of `usr/local/bin`
 
-### Removed
-
-- The `custom_cursor_colors` config field was deleted, remove the `colors.cursor.*` options
-  to achieve the same behavior as setting it to `false`
-- The `scale_with_dpi` configuration value has been removed, on Linux the env
-    variable `WINIT_HIDPI_FACTOR=1` can be set instead to disable DPI scaling
-
 ### Fixed
 
 - Fixed erroneous results when using the `indexed_colors` config option
@@ -482,6 +688,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Wayland, key repetition works again
 - On macOS, Alacritty will now use the integrated GPU again when available
 - On Linux, the `WINIT_HIDPI_FACTOR` environment variable can be set from the config now
+
+### Removed
+
+- The `custom_cursor_colors` config field was deleted, remove the `colors.cursor.*` options
+  to achieve the same behavior as setting it to `false`
+- The `scale_with_dpi` configuration value has been removed, on Linux the env
+    variable `WINIT_HIDPI_FACTOR=1` can be set instead to disable DPI scaling
 
 ## Version 0.2.1
 
@@ -508,11 +721,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   present on the system
 - The default `TERM` value is no longer static; the `alacritty` entry is used if
   available, otherwise the `xterm-256color` entry is used instead
-
-### Removed
-
-- The terminfo entry `alacritty-256color`. It is replaced by the `alacritty`
-  entry (which also advertises 256 colors)
+- The values `true` and `false` for the config option `window.decorations` have been replaced with
+    `full` and `none`
 
 ### Fixed
 
@@ -523,15 +733,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Empty lines in selections are now properly copied to the clipboard
 - Selection start point lagging behind initial cursor position
 - Rendering of selections which start above the visible area and end below it
-
-### Deprecated
-
-- The config option `window.decorations` should now use `full` or `none` instead
-  of `true` or `false`, respectively.
-
-### Security
-
 - Bracketed paste mode now filters escape sequences beginning with \x1b
+
+### Removed
+
+- The terminfo entry `alacritty-256color`. It is replaced by the `alacritty`
+  entry (which also advertises 256 colors)
 
 ## Version 0.2.0
 

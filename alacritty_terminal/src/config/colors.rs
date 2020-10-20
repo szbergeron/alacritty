@@ -1,8 +1,9 @@
 use log::error;
 use serde::{Deserialize, Deserializer};
+use serde_yaml::Value;
 
 use crate::config::{failure_default, LOG_TARGET_CONFIG};
-use crate::term::color::Rgb;
+use crate::term::color::{CellRgb, Rgb};
 
 #[serde(default)]
 #[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -11,6 +12,8 @@ pub struct Colors {
     pub primary: PrimaryColors,
     #[serde(deserialize_with = "failure_default")]
     pub cursor: CursorColors,
+    #[serde(deserialize_with = "failure_default")]
+    pub vi_mode_cursor: CursorColors,
     #[serde(deserialize_with = "failure_default")]
     pub selection: SelectionColors,
     #[serde(deserialize_with = "failure_default")]
@@ -21,6 +24,8 @@ pub struct Colors {
     pub dim: Option<AnsiColors>,
     #[serde(deserialize_with = "failure_default")]
     pub indexed_colors: Vec<IndexedColor>,
+    #[serde(deserialize_with = "failure_default")]
+    pub search: SearchColors,
 }
 
 impl Colors {
@@ -30,6 +35,32 @@ impl Colors {
 
     pub fn bright(&self) -> &AnsiColors {
         &self.bright.0
+    }
+
+    pub fn search_bar_foreground(&self) -> Rgb {
+        self.search.bar.foreground.unwrap_or(self.primary.background)
+    }
+
+    pub fn search_bar_background(&self) -> Rgb {
+        self.search.bar.background.unwrap_or(self.primary.foreground)
+    }
+}
+
+#[derive(Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+struct DefaultForegroundCellRgb(CellRgb);
+
+impl Default for DefaultForegroundCellRgb {
+    fn default() -> Self {
+        Self(CellRgb::CellForeground)
+    }
+}
+
+#[derive(Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+struct DefaultBackgroundCellRgb(CellRgb);
+
+impl Default for DefaultBackgroundCellRgb {
+    fn default() -> Self {
+        Self(CellRgb::CellBackground)
     }
 }
 
@@ -42,11 +73,11 @@ pub struct IndexedColor {
     pub color: Rgb,
 }
 
-fn deserialize_color_index<'a, D>(deserializer: D) -> ::std::result::Result<u8, D::Error>
+fn deserialize_color_index<'a, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: Deserializer<'a>,
 {
-    let value = serde_yaml::Value::deserialize(deserializer)?;
+    let value = Value::deserialize(deserializer)?;
     match u8::deserialize(value) {
         Ok(index) => {
             if index < 16 {
@@ -57,7 +88,7 @@ where
                     index
                 );
 
-                // Return value out of range to ignore this color
+                // Return value out of range to ignore this color.
                 Ok(0)
             } else {
                 Ok(index)
@@ -66,7 +97,7 @@ where
         Err(err) => {
             error!(target: LOG_TARGET_CONFIG, "Problem with config: {}; ignoring setting", err);
 
-            // Return value out of range to ignore this color
+            // Return value out of range to ignore this color.
             Ok(0)
         },
     }
@@ -76,26 +107,91 @@ where
 #[derive(Deserialize, Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct CursorColors {
     #[serde(deserialize_with = "failure_default")]
-    pub text: Option<Rgb>,
+    text: DefaultBackgroundCellRgb,
     #[serde(deserialize_with = "failure_default")]
-    pub cursor: Option<Rgb>,
+    cursor: DefaultForegroundCellRgb,
+}
+
+impl CursorColors {
+    pub fn text(self) -> CellRgb {
+        self.text.0
+    }
+
+    pub fn cursor(self) -> CellRgb {
+        self.cursor.0
+    }
 }
 
 #[serde(default)]
 #[derive(Deserialize, Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct SelectionColors {
     #[serde(deserialize_with = "failure_default")]
-    pub text: Option<Rgb>,
+    text: DefaultBackgroundCellRgb,
     #[serde(deserialize_with = "failure_default")]
-    pub background: Option<Rgb>,
+    background: DefaultForegroundCellRgb,
+}
+
+impl SelectionColors {
+    pub fn text(self) -> CellRgb {
+        self.text.0
+    }
+
+    pub fn background(self) -> CellRgb {
+        self.background.0
+    }
+}
+
+#[serde(default)]
+#[derive(Deserialize, Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct SearchColors {
+    #[serde(deserialize_with = "failure_default")]
+    pub matches: MatchColors,
+    #[serde(deserialize_with = "failure_default")]
+    bar: BarColors,
+}
+
+#[serde(default)]
+#[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct MatchColors {
+    #[serde(deserialize_with = "failure_default")]
+    pub foreground: CellRgb,
+    #[serde(deserialize_with = "deserialize_match_background")]
+    pub background: CellRgb,
+}
+
+impl Default for MatchColors {
+    fn default() -> Self {
+        Self { foreground: CellRgb::default(), background: default_match_background() }
+    }
+}
+
+fn deserialize_match_background<'a, D>(deserializer: D) -> Result<CellRgb, D::Error>
+where
+    D: Deserializer<'a>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(CellRgb::deserialize(value).unwrap_or_else(|_| default_match_background()))
+}
+
+fn default_match_background() -> CellRgb {
+    CellRgb::Rgb(Rgb { r: 0xff, g: 0xff, b: 0xff })
+}
+
+#[serde(default)]
+#[derive(Deserialize, Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct BarColors {
+    #[serde(deserialize_with = "failure_default")]
+    foreground: Option<Rgb>,
+    #[serde(deserialize_with = "failure_default")]
+    background: Option<Rgb>,
 }
 
 #[serde(default)]
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PrimaryColors {
-    #[serde(default = "default_background", deserialize_with = "failure_default")]
+    #[serde(deserialize_with = "failure_default")]
     pub background: Rgb,
-    #[serde(default = "default_foreground", deserialize_with = "failure_default")]
+    #[serde(deserialize_with = "failure_default")]
     pub foreground: Rgb,
     #[serde(deserialize_with = "failure_default")]
     pub bright_foreground: Option<Rgb>,
@@ -106,23 +202,15 @@ pub struct PrimaryColors {
 impl Default for PrimaryColors {
     fn default() -> Self {
         PrimaryColors {
-            background: default_background(),
-            foreground: default_foreground(),
+            background: Rgb { r: 0x1d, g: 0x1f, b: 0x21 },
+            foreground: Rgb { r: 0xc5, g: 0xc8, b: 0xc6 },
             bright_foreground: Default::default(),
             dim_foreground: Default::default(),
         }
     }
 }
 
-fn default_background() -> Rgb {
-    Rgb { r: 0, g: 0, b: 0 }
-}
-
-fn default_foreground() -> Rgb {
-    Rgb { r: 0xea, g: 0xea, b: 0xea }
-}
-
-/// The 8-colors sections of config
+/// The 8-colors sections of config.
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AnsiColors {
     #[serde(deserialize_with = "failure_default")]
@@ -149,14 +237,14 @@ struct NormalColors(AnsiColors);
 impl Default for NormalColors {
     fn default() -> Self {
         NormalColors(AnsiColors {
-            black: Rgb { r: 0x00, g: 0x00, b: 0x00 },
-            red: Rgb { r: 0xd5, g: 0x4e, b: 0x53 },
-            green: Rgb { r: 0xb9, g: 0xca, b: 0x4a },
-            yellow: Rgb { r: 0xe6, g: 0xc5, b: 0x47 },
-            blue: Rgb { r: 0x7a, g: 0xa6, b: 0xda },
-            magenta: Rgb { r: 0xc3, g: 0x97, b: 0xd8 },
-            cyan: Rgb { r: 0x70, g: 0xc0, b: 0xba },
-            white: Rgb { r: 0xea, g: 0xea, b: 0xea },
+            black: Rgb { r: 0x1d, g: 0x1f, b: 0x21 },
+            red: Rgb { r: 0xcc, g: 0x66, b: 0x66 },
+            green: Rgb { r: 0xb5, g: 0xbd, b: 0x68 },
+            yellow: Rgb { r: 0xf0, g: 0xc6, b: 0x74 },
+            blue: Rgb { r: 0x81, g: 0xa2, b: 0xbe },
+            magenta: Rgb { r: 0xb2, g: 0x94, b: 0xbb },
+            cyan: Rgb { r: 0x8a, g: 0xbe, b: 0xb7 },
+            white: Rgb { r: 0xc5, g: 0xc8, b: 0xc6 },
         })
     }
 }
@@ -168,13 +256,13 @@ impl Default for BrightColors {
     fn default() -> Self {
         BrightColors(AnsiColors {
             black: Rgb { r: 0x66, g: 0x66, b: 0x66 },
-            red: Rgb { r: 0xff, g: 0x33, b: 0x34 },
-            green: Rgb { r: 0x9e, g: 0xc4, b: 0x00 },
+            red: Rgb { r: 0xd5, g: 0x4e, b: 0x53 },
+            green: Rgb { r: 0xb9, g: 0xca, b: 0x4a },
             yellow: Rgb { r: 0xe7, g: 0xc5, b: 0x47 },
             blue: Rgb { r: 0x7a, g: 0xa6, b: 0xda },
-            magenta: Rgb { r: 0xb7, g: 0x7e, b: 0xe0 },
-            cyan: Rgb { r: 0x54, g: 0xce, b: 0xd6 },
-            white: Rgb { r: 0xff, g: 0xff, b: 0xff },
+            magenta: Rgb { r: 0xc3, g: 0x97, b: 0xd8 },
+            cyan: Rgb { r: 0x70, g: 0xc0, b: 0xb1 },
+            white: Rgb { r: 0xea, g: 0xea, b: 0xea },
         })
     }
 }

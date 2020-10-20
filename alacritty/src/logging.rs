@@ -1,22 +1,9 @@
-// Copyright 2016 Joe Wilm, The Alacritty Project Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-//! Logging for alacritty.
+//! Logging for Alacritty.
 //!
 //! The main executable is supposed to call `initialize()` exactly once during
 //! startup. All logging messages are written to stdout, given that their
 //! log-level is sufficient for the level configured in `cli::Options`.
+
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, LineWriter, Stdout, Write};
@@ -27,15 +14,16 @@ use std::sync::{Arc, Mutex};
 
 use glutin::event_loop::EventLoopProxy;
 use log::{self, Level};
-use time;
-
-use alacritty_terminal::event::Event;
-use alacritty_terminal::message_bar::Message;
-use alacritty_terminal::term::color;
 
 use crate::cli::Options;
+use crate::event::Event;
+use crate::message_bar::{Message, MessageType};
 
+/// Name for the environment variable containing the log file's path.
 const ALACRITTY_LOG_ENV: &str = "ALACRITTY_LOG";
+/// List of targets which will be logged by Alacritty.
+const ALLOWED_TARGETS: [&str; 4] =
+    ["alacritty_terminal", "alacritty_config", "alacritty", "crossfont"];
 
 pub fn initialize(
     options: &Options,
@@ -43,17 +31,11 @@ pub fn initialize(
 ) -> Result<Option<PathBuf>, log::SetLoggerError> {
     log::set_max_level(options.log_level);
 
-    // Use env_logger if RUST_LOG environment variable is defined. Otherwise,
-    // use the alacritty-only logger.
-    if std::env::var("RUST_LOG").is_ok() {
-        env_logger::try_init()?;
-        Ok(None)
-    } else {
-        let logger = Logger::new(event_proxy);
-        let path = logger.file_path();
-        log::set_boxed_logger(Box::new(logger))?;
-        Ok(path)
-    }
+    let logger = Logger::new(event_proxy);
+    let path = logger.file_path();
+    log::set_boxed_logger(Box::new(logger))?;
+
+    Ok(path)
 }
 
 pub struct Logger {
@@ -77,6 +59,37 @@ impl Logger {
             None
         }
     }
+
+    /// Log a record to the message bar.
+    fn message_bar_log(&self, record: &log::Record<'_>, logfile_path: &str) {
+        let event_proxy = match self.event_proxy.lock() {
+            Ok(event_proxy) => event_proxy,
+            Err(_) => return,
+        };
+
+        #[cfg(not(windows))]
+        let env_var = format!("${}", ALACRITTY_LOG_ENV);
+        #[cfg(windows)]
+        let env_var = format!("%{}%", ALACRITTY_LOG_ENV);
+
+        let msg = format!(
+            "[{}] See log at {} ({}):\n{}",
+            record.level(),
+            logfile_path,
+            env_var,
+            record.args(),
+        );
+        let message_type = match record.level() {
+            Level::Error => MessageType::Error,
+            Level::Warn => MessageType::Warning,
+            _ => unreachable!(),
+        };
+
+        let mut message = Message::new(msg, message_type);
+        message.set_target(record.target().to_owned());
+
+        let _ = event_proxy.send_event(Event::Message(message));
+    }
 }
 
 impl log::Log for Logger {
@@ -85,55 +98,30 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if self.enabled(record.metadata()) && record.target().starts_with("alacritty") {
-            let now = time::strftime("%F %R", &time::now()).unwrap();
+        // Get target crate.
+        let index = record.target().find(':').unwrap_or_else(|| record.target().len());
+        let target = &record.target()[..index];
 
-            let msg = if record.level() >= Level::Trace {
-                format!(
-                    "[{}] [{}] [{}:{}] {}\n",
-                    now,
-                    record.level(),
-                    record.file().unwrap_or("?"),
-                    record.line().map(|l| l.to_string()).unwrap_or_else(|| "?".into()),
-                    record.args()
-                )
-            } else {
-                format!("[{}] [{}] {}\n", now, record.level(), record.args())
-            };
+        // Only log our own crates.
+        if !self.enabled(record.metadata()) || !ALLOWED_TARGETS.contains(&target) {
+            return;
+        }
 
-            if let Ok(ref mut logfile) = self.logfile.lock() {
-                let _ = logfile.write_all(msg.as_ref());
+        let now = time::strftime("%F %T.%f", &time::now()).unwrap();
+        let msg = format!("[{}] [{:<5}] [{}] {}\n", now, record.level(), target, record.args());
 
-                if record.level() <= Level::Warn {
-                    #[cfg(not(windows))]
-                    let env_var = format!("${}", ALACRITTY_LOG_ENV);
-                    #[cfg(windows)]
-                    let env_var = format!("%{}%", ALACRITTY_LOG_ENV);
+        // Write to stdout.
+        if let Ok(mut stdout) = self.stdout.lock() {
+            let _ = stdout.write_all(msg.as_ref());
+        }
 
-                    let msg = format!(
-                        "[{}] See log at {} ({}):\n{}",
-                        record.level(),
-                        logfile.path.to_string_lossy(),
-                        env_var,
-                        record.args(),
-                    );
-                    let color = match record.level() {
-                        Level::Error => color::RED,
-                        Level::Warn => color::YELLOW,
-                        _ => unreachable!(),
-                    };
+        if let Ok(mut logfile) = self.logfile.lock() {
+            // Write to logfile.
+            let _ = logfile.write_all(msg.as_ref());
 
-                    if let Ok(event_proxy) = self.event_proxy.lock() {
-                        let mut message = Message::new(msg, color);
-                        message.set_target(record.target().to_owned());
-
-                        let _ = event_proxy.send_event(Event::Message(message));
-                    }
-                }
-            }
-
-            if let Ok(ref mut stdout) = self.stdout.lock() {
-                let _ = stdout.write_all(msg.as_ref());
+            // Write to message bar.
+            if record.level() <= Level::Warn {
+                self.message_bar_log(record, &logfile.path.to_string_lossy());
             }
         }
     }
@@ -152,19 +140,19 @@ impl OnDemandLogFile {
         let mut path = env::temp_dir();
         path.push(format!("Alacritty-{}.log", process::id()));
 
-        // Set log path as an environment variable
+        // Set log path as an environment variable.
         env::set_var(ALACRITTY_LOG_ENV, path.as_os_str());
 
         OnDemandLogFile { path, file: None, created: Arc::new(AtomicBool::new(false)) }
     }
 
     fn file(&mut self) -> Result<&mut LineWriter<File>, io::Error> {
-        // Allow to recreate the file if it has been deleted at runtime
+        // Allow to recreate the file if it has been deleted at runtime.
         if self.file.is_some() && !self.path.as_path().exists() {
             self.file = None;
         }
 
-        // Create the file if it doesn't exist yet
+        // Create the file if it doesn't exist yet.
         if self.file.is_none() {
             let file = OpenOptions::new().append(true).create(true).open(&self.path);
 

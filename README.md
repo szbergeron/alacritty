@@ -28,137 +28,42 @@ a daily driver.
 
 Precompiled binaries are available from the [GitHub releases page](https://github.com/alacritty/alacritty/releases).
 
+## Features
+
+You can find an overview over the features available in Alacritty [here](./docs/features.md).
+
 ## Further information
 
 - [Announcing Alacritty, a GPU-Accelerated Terminal Emulator](https://jwilm.io/blog/announcing-alacritty/) January 6, 2017
 - [A short talk about Alacritty at the Rust Meetup January 2017](https://air.mozilla.org/rust-meetup-january-2017/) (starts at 57:00)
 - [Alacritty Lands Scrollback, Publishes Benchmarks](https://jwilm.io/blog/alacritty-lands-scrollback/) September 17, 2018
 - [Version 0.3.0 Release Announcement](https://blog.christianduerr.com/alacritty_030_announcement) April 07, 2019
+- [Version 0.5.0 Release Announcement](https://blog.christianduerr.com/alacritty_0_5_0_announcement) July 31, 2020
 
 ## Installation
 
-Some operating systems already provide binaries for Alacritty, for everyone
-else the instructions to build Alacritty from source can be found [here](INSTALL.md).
+Alacritty can be installed by using various package managers on Linux, BSD,
+macOS and Windows.
 
-### Arch Linux
-
-```sh
-pacman -S alacritty
-```
-
-### Fedora
-
-Unofficial builds of stable tags can be found in Fedora Copr:
-[pschyska/alacritty](https://copr.fedorainfracloud.org/coprs/pschyska/alacritty/).
-
-``` sh
-dnf copr enable pschyska/alacritty
-dnf install alacritty
-```
-
-If you want to help test pre-releases, you can additionally enable
-[pschyska/alacritty-testing](https://copr.fedorainfracloud.org/coprs/pschyska/alacritty-testing/).
-
-### Gentoo Linux
-
-```sh
-emerge x11-terms/alacritty
-```
-
-### Mageia
-
-```sh
-urpmi alacritty
-```
-
-### NixOS
-
-```sh
-nix-env -iA nixos.alacritty
-```
-
-### openSUSE Tumbleweed
-
-```sh
-zypper in alacritty
-```
-
-### Pop!\_OS / Ubuntu
-
-> If you're not running Pop!_OS, you'll have to add a third party repository first:
->
-> ```sh
-> add-apt-repository ppa:mmstick76/alacritty
-> ```
-
-```sh
-apt install alacritty
-```
-
-### Solus
-
-```sh
-eopkg install alacritty
-```
-
-### Void Linux
-
-```sh
-xbps-install alacritty
-```
-
-### FreeBSD
-
-```sh
-pkg install alacritty
-```
-
-### macOS
-
-```sh
-brew cask install alacritty
-```
-
-Once the cask is installed, it is recommended to setup the [manual page](INSTALL.md#manual-page),
-[shell completions](INSTALL.md#shell-completions), and [terminfo definitions](INSTALL.md#terminfo).
-
-### Windows
-
-#### Via [Chocolatey](https://chocolatey.org)
-
-```batch
-choco install alacritty
-```
-
-#### Via [Scoop](https://scoop.sh)
-
-```batch
-scoop bucket add extras
-scoop install alacritty
-```
-
-### Other
-
-Prebuilt binaries for Linux, macOS, and Windows can be downloaded from the
-[GitHub releases page](https://github.com/alacritty/alacritty/releases). If your
-desktop environment has trouble rendering the default SVG icons, you can find
-a prerendered SVG as well as simplified versions of the SVG in the
-`extra/logo/compat` directory.
-
-On Windows, Alacritty also requires Microsoft's VC++ redistributable.
-
-For Windows versions older than Windows 10 (October 2018 Update), Alacritty
-requires winpty to emulate UNIX's PTY API. The agent is a single binary
-(`winpty-agent.exe`) which **must** be in the same directory as the Alacritty
-executable and is available through the
+Prebuilt binaries for macOS and Windows can also be downloaded from the
 [GitHub releases page](https://github.com/alacritty/alacritty/releases).
+
+On Windows, Alacritty requires winpty to emulate UNIX's PTY API for versions
+older than Windows 10 (October 2018 Update) and Microsoft's VC++
+redistributable. The winpty agent (`winpty-agent.exe`) **must** be in the same
+directory as the Alacritty executable and is available through the
+[GitHub releases page](https://github.com/alacritty/alacritty/releases).
+
+For everyone else, the detailed instructions to install Alacritty can be found
+[here](INSTALL.md).
 
 ## Configuration
 
 You can find the default configuration file with documentation for all available
 fields on the [GitHub releases page](https://github.com/alacritty/alacritty/releases) for each release.
 
-Alacritty looks for the configuration file at the following paths:
+Alacritty doesn't create the config file for you, but it looks for one in the
+following locations:
 
 1. `$XDG_CONFIG_HOME/alacritty/alacritty.yml`
 2. `$XDG_CONFIG_HOME/alacritty.yml`
@@ -167,7 +72,7 @@ Alacritty looks for the configuration file at the following paths:
 
 ### Windows
 
-On Windows the config file is located at:
+On Windows, the config file should be located at:
 
 `%APPDATA%\alacritty\alacritty.yml`
 

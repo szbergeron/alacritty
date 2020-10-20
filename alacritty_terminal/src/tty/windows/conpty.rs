@@ -1,17 +1,3 @@
-// Copyright 2016 Joe Wilm, The Alacritty Project Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use std::i16;
 use std::io::Error;
 use std::mem;
@@ -19,7 +5,6 @@ use std::os::windows::io::IntoRawHandle;
 use std::ptr;
 
 use mio_anonymous_pipes::{EventedAnonRead, EventedAnonWrite};
-use miow;
 use winapi::shared::basetsd::{PSIZE_T, SIZE_T};
 use winapi::shared::minwindef::{BYTE, DWORD};
 use winapi::shared::ntdef::{HANDLE, HRESULT, LPWSTR};
@@ -42,7 +27,7 @@ use crate::tty::windows::{cmdline, win32_string, Pty};
 //  done until a safety net is in place for versions of Windows
 //  that do not support the ConPTY api, as such versions will
 //  pass unit testing - but fail to actually function.
-/// Dynamically-loaded Pseudoconsole API from kernel32.dll
+/// Dynamically-loaded Pseudoconsole API from kernel32.dll.
 ///
 /// The field names are deliberately PascalCase as this matches
 /// the defined symbols in kernel32 and also is the convention
@@ -58,7 +43,7 @@ struct ConptyApi {
 impl ConptyApi {
     /// Load the API or None if it cannot be found.
     pub fn new() -> Option<Self> {
-        // Unsafe because windows API calls
+        // Unsafe because windows API calls.
         unsafe {
             let hmodule = GetModuleHandleA("kernel32\0".as_ptr() as _);
             assert!(!hmodule.is_null());
@@ -80,7 +65,7 @@ impl ConptyApi {
     }
 }
 
-/// RAII Pseudoconsole
+/// RAII Pseudoconsole.
 pub struct Conpty {
     pub handle: HPCON,
     api: ConptyApi,
@@ -91,12 +76,12 @@ impl Drop for Conpty {
         // XXX: This will block until the conout pipe is drained. Will cause a deadlock if the
         // conout pipe has already been dropped by this point.
         //
-        // See PR #3084 and https://docs.microsoft.com/en-us/windows/console/closepseudoconsole
+        // See PR #3084 and https://docs.microsoft.com/en-us/windows/console/closepseudoconsole.
         unsafe { (self.api.ClosePseudoConsole)(self.handle) }
     }
 }
 
-// The Conpty handle can be sent between threads.
+// The ConPTY handle can be sent between threads.
 unsafe impl Send for Conpty {}
 
 pub fn new<C>(config: &Config<C>, size: &SizeInfo, _window_id: Option<usize>) -> Option<Pty> {
@@ -118,7 +103,7 @@ pub fn new<C>(config: &Config<C>, size: &SizeInfo, _window_id: Option<usize>) ->
     let coord =
         coord_from_sizeinfo(size).expect("Overflow when creating initial size on pseudoconsole");
 
-    // Create the Pseudo Console, using the pipes
+    // Create the Pseudo Console, using the pipes.
     let result = unsafe {
         (api.CreatePseudoConsole)(
             coord,
@@ -133,19 +118,18 @@ pub fn new<C>(config: &Config<C>, size: &SizeInfo, _window_id: Option<usize>) ->
 
     let mut success;
 
-    // Prepare child process startup info
+    // Prepare child process startup info.
 
     let mut size: SIZE_T = 0;
 
     let mut startup_info_ex: STARTUPINFOEXW = Default::default();
 
-    let title = win32_string(&config.window.title);
-    startup_info_ex.StartupInfo.lpTitle = title.as_ptr() as LPWSTR;
+    startup_info_ex.StartupInfo.lpTitle = std::ptr::null_mut() as LPWSTR;
 
     startup_info_ex.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
 
     // Setting this flag but leaving all the handles as default (null) ensures the
-    // pty process does not inherit any handles from this Alacritty process.
+    // PTY process does not inherit any handles from this Alacritty process.
     startup_info_ex.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
 
     // Create the appropriately sized thread attribute list.
@@ -185,12 +169,12 @@ pub fn new<C>(config: &Config<C>, size: &SizeInfo, _window_id: Option<usize>) ->
         }
     }
 
-    // Set thread attribute list's Pseudo Console to the specified ConPTY
+    // Set thread attribute list's Pseudo Console to the specified ConPTY.
     unsafe {
         success = UpdateProcThreadAttribute(
             startup_info_ex.lpAttributeList,
             0,
-            22 | 0x0002_0000, // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+            22 | 0x0002_0000, // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE.
             pty_handle,
             mem::size_of::<HPCON>(),
             ptr::null_mut(),
@@ -231,18 +215,10 @@ pub fn new<C>(config: &Config<C>, size: &SizeInfo, _window_id: Option<usize>) ->
     let child_watcher = ChildExitWatcher::new(proc_info.hProcess).unwrap();
     let conpty = Conpty { handle: pty_handle, api };
 
-    Some(Pty {
-        backend: super::PtyBackend::Conpty(conpty),
-        conout: super::EventedReadablePipe::Anonymous(conout),
-        conin: super::EventedWritablePipe::Anonymous(conin),
-        read_token: 0.into(),
-        write_token: 0.into(),
-        child_event_token: 0.into(),
-        child_watcher,
-    })
+    Some(Pty::new(conpty, conout, conin, child_watcher))
 }
 
-// Panic with the last os error as message
+// Panic with the last os error as message.
 fn panic_shell_spawn() {
     panic!("Unable to spawn shell: {}", Error::last_os_error());
 }
@@ -257,12 +233,12 @@ impl OnResize for Conpty {
 }
 
 /// Helper to build a COORD from a SizeInfo, returning None in overflow cases.
-fn coord_from_sizeinfo(sizeinfo: &SizeInfo) -> Option<COORD> {
-    let cols = sizeinfo.cols().0;
-    let lines = sizeinfo.lines().0;
+fn coord_from_sizeinfo(size: &SizeInfo) -> Option<COORD> {
+    let cols = size.cols().0;
+    let lines = size.screen_lines().0;
 
     if cols <= i16::MAX as usize && lines <= i16::MAX as usize {
-        Some(COORD { X: sizeinfo.cols().0 as i16, Y: sizeinfo.lines().0 as i16 })
+        Some(COORD { X: cols as i16, Y: lines as i16 })
     } else {
         None
     }

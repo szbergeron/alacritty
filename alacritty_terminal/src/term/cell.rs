@@ -1,16 +1,3 @@
-// Copyright 2016 Joe Wilm, The Alacritty Project Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 use bitflags::bitflags;
 
 use serde::{Deserialize, Serialize};
@@ -19,24 +6,26 @@ use crate::ansi::{Color, NamedColor};
 use crate::grid::{self, GridCell};
 use crate::index::Column;
 
-// Maximum number of zerowidth characters which will be stored per cell.
+/// Maximum number of zerowidth characters which will be stored per cell.
 pub const MAX_ZEROWIDTH_CHARS: usize = 5;
 
 bitflags! {
     #[derive(Serialize, Deserialize)]
     pub struct Flags: u16 {
-        const INVERSE           = 0b00_0000_0001;
-        const BOLD              = 0b00_0000_0010;
-        const ITALIC            = 0b00_0000_0100;
-        const BOLD_ITALIC       = 0b00_0000_0110;
-        const UNDERLINE         = 0b00_0000_1000;
-        const WRAPLINE          = 0b00_0001_0000;
-        const WIDE_CHAR         = 0b00_0010_0000;
-        const WIDE_CHAR_SPACER  = 0b00_0100_0000;
-        const DIM               = 0b00_1000_0000;
-        const DIM_BOLD          = 0b00_1000_0010;
-        const HIDDEN            = 0b01_0000_0000;
-        const STRIKEOUT         = 0b10_0000_0000;
+        const INVERSE                   = 0b0000_0000_0000_0001;
+        const BOLD                      = 0b0000_0000_0000_0010;
+        const ITALIC                    = 0b0000_0000_0000_0100;
+        const BOLD_ITALIC               = 0b0000_0000_0000_0110;
+        const UNDERLINE                 = 0b0000_0000_0000_1000;
+        const WRAPLINE                  = 0b0000_0000_0001_0000;
+        const WIDE_CHAR                 = 0b0000_0000_0010_0000;
+        const WIDE_CHAR_SPACER          = 0b0000_0000_0100_0000;
+        const DIM                       = 0b0000_0000_1000_0000;
+        const DIM_BOLD                  = 0b0000_0000_1000_0010;
+        const HIDDEN                    = 0b0000_0001_0000_0000;
+        const STRIKEOUT                 = 0b0000_0010_0000_0000;
+        const LEADING_WIDE_CHAR_SPACER  = 0b0000_0100_0000_0000;
+        const DOUBLE_UNDERLINE          = 0b0000_1000_0000_0000;
     }
 }
 
@@ -70,9 +59,11 @@ impl GridCell for Cell {
             && !self.flags.intersects(
                 Flags::INVERSE
                     | Flags::UNDERLINE
+                    | Flags::DOUBLE_UNDERLINE
                     | Flags::STRIKEOUT
                     | Flags::WRAPLINE
-                    | Flags::WIDE_CHAR_SPACER,
+                    | Flags::WIDE_CHAR_SPACER
+                    | Flags::LEADING_WIDE_CHAR_SPACER,
             )
     }
 
@@ -92,9 +83,9 @@ impl GridCell for Cell {
     }
 }
 
-/// Get the length of occupied cells in a line
+/// Get the length of occupied cells in a line.
 pub trait LineLength {
-    /// Calculate the occupied line length
+    /// Calculate the occupied line length.
     fn line_length(&self) -> Column;
 }
 
@@ -139,7 +130,7 @@ impl Cell {
 
     #[inline]
     pub fn reset(&mut self, template: &Cell) {
-        // memcpy template to self
+        // memcpy template to self.
         *self = Cell { c: template.c, bg: template.bg, ..Cell::default() };
     }
 
@@ -178,7 +169,7 @@ mod tests {
     #[test]
     fn line_length_works() {
         let template = Cell::default();
-        let mut row = Row::new(Column(10), &template);
+        let mut row = Row::new(Column(10), template);
         row[Column(5)].c = 'a';
 
         assert_eq!(row.line_length(), Column(6));
@@ -187,7 +178,7 @@ mod tests {
     #[test]
     fn line_length_works_with_wrapline() {
         let template = Cell::default();
-        let mut row = Row::new(Column(10), &template);
+        let mut row = Row::new(Column(10), template);
         row[Column(9)].flags.insert(super::Flags::WRAPLINE);
 
         assert_eq!(row.line_length(), Column(10));

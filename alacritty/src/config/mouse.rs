@@ -4,9 +4,9 @@ use glutin::event::ModifiersState;
 use log::error;
 use serde::{Deserialize, Deserializer};
 
-use alacritty_terminal::config::{failure_default, LOG_TARGET_CONFIG};
+use alacritty_terminal::config::{failure_default, Program, LOG_TARGET_CONFIG};
 
-use crate::config::bindings::{CommandWrapper, ModsWrapper};
+use crate::config::bindings::ModsWrapper;
 
 #[serde(default)]
 #[derive(Default, Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -24,11 +24,11 @@ pub struct Mouse {
 #[serde(default)]
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Url {
-    // Program for opening links
+    /// Program for opening links.
     #[serde(deserialize_with = "deserialize_launcher")]
-    pub launcher: Option<CommandWrapper>,
+    pub launcher: Option<Program>,
 
-    // Modifier used to open links
+    /// Modifier used to open links.
     #[serde(deserialize_with = "failure_default")]
     modifiers: ModsWrapper,
 }
@@ -39,23 +39,21 @@ impl Url {
     }
 }
 
-fn deserialize_launcher<'a, D>(
-    deserializer: D,
-) -> ::std::result::Result<Option<CommandWrapper>, D::Error>
+fn deserialize_launcher<'a, D>(deserializer: D) -> std::result::Result<Option<Program>, D::Error>
 where
     D: Deserializer<'a>,
 {
     let default = Url::default().launcher;
 
-    // Deserialize to generic value
+    // Deserialize to generic value.
     let val = serde_yaml::Value::deserialize(deserializer)?;
 
-    // Accept `None` to disable the launcher
+    // Accept `None` to disable the launcher.
     if val.as_str().filter(|v| v.to_lowercase() == "none").is_some() {
         return Ok(None);
     }
 
-    match <Option<CommandWrapper>>::deserialize(val) {
+    match <Option<Program>>::deserialize(val) {
         Ok(launcher) => Ok(launcher),
         Err(err) => {
             error!(
@@ -73,11 +71,11 @@ impl Default for Url {
     fn default() -> Url {
         Url {
             #[cfg(not(any(target_os = "macos", windows)))]
-            launcher: Some(CommandWrapper::Just(String::from("xdg-open"))),
+            launcher: Some(Program::Just(String::from("xdg-open"))),
             #[cfg(target_os = "macos")]
-            launcher: Some(CommandWrapper::Just(String::from("open"))),
+            launcher: Some(Program::Just(String::from("open"))),
             #[cfg(windows)]
-            launcher: Some(CommandWrapper::Just(String::from("explorer"))),
+            launcher: Some(Program::Just(String::from("explorer"))),
             modifiers: Default::default(),
         }
     }

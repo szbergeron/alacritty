@@ -1,6 +1,6 @@
 [package]
 name = "alacritty_terminal"
-version = "0.4.2-dev"
+version = "0.11.0-dev"
 authors = ["Christian Duerr <contact@christianduerr.com>", "Joe Wilm <joe@jwilm.com>"]
 license = "Apache-2.0"
 description = "Library for writing terminal emulators"
@@ -10,28 +10,24 @@ edition = "2018"
 
 [dependencies]
 libc = "0.2"
-notify = "4"
 bitflags = "1"
-font = { path = "../font" }
-parking_lot = "0.9"
+parking_lot = "0.11.0"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.8"
-vte = { version = "0.5.0", default-features = false }
+vte = { git = "https://github.com/alacritty/vte", rev = "4f44023dab081f7da74fee14bc53b10ee8f96a1e", default-features = false }
 mio = "0.6.20"
 mio-extras = "2"
 log = "0.4"
 unicode-width = "0.1"
-base64 = "0.11.0"
-terminfo = "0.6.1"
-url = "2"
-copypasta = "0.6.1"
+base64 = "0.12.0"
+terminfo = "0.7.1"
+regex-automata = "0.1.9"
 
 [target.'cfg(unix)'.dependencies]
-nix = "0.15.0"
+nix = "0.18.0"
 signal-hook = { version = "0.1", features = ["mio-support"] }
 
 [target.'cfg(windows)'.dependencies]
-winpty = { path = "../winpty" }
 mio-named-pipes = "0.1"
 miow = "0.3"
 winapi = { version = "0.3.7", features = [
@@ -40,12 +36,12 @@ winapi = { version = "0.3.7", features = [
 ]}
 mio-anonymous-pipes = "0.1"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-objc = "0.2.2"
+# Winpty crate supports only MSVC.
+[target.'cfg(all(target_os="windows", target_env="msvc"))'.dependencies]
+winpty = { version = "0.2.0", optional = true }
 
 [features]
-default = []
-nightly = []
+default = ["winpty"]
 bench = []
 
 [dev-dependencies]
